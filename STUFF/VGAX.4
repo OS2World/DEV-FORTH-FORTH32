@@ -1,0 +1,88 @@
+\ -----
+\ vga turtle graphics, borrowed from RIFORTH by Bob Illyes
+
+HEX
+
+CREATE COLOR   7 ,
+
+CODE VMODE ( n -- )
+        0 # AX MOV
+        BL AL MOV
+        INT10 #) CALL
+        BX POP
+        END-CODE
+        NO-EXPAND
+
+CODE CONDENSED
+   BX PUSH
+   $1112 # AX MOV
+   0 # BX MOV
+   INT10 #) CALL
+   BX POP
+   END-CODE
+   NO-EXPAND
+
+CODE NORMAL
+   BX PUSH
+   $1111 # AX MOV
+   0 # BX MOV
+   INT10 #) CALL
+   BX POP
+   END-CODE
+   NO-EXPAND
+
+CODE PLOT ( x y -- )
+   CX POP
+   BX DX MOV
+   COLOR #) AX MOV
+   0C # AH MOV
+   0 # BX MOV
+   INT10 #) CALL
+   BX POP
+   END-CODE
+   NO-EXPAND
+
+
+: TEXT   3 VMODE  FASTIO ;
+: VGA   13 VMODE  STDIO ;
+
+: 50LINES   CONDENSED [ VIDEO ] 8000 VLIMIT ! 49 YLIM ! ;
+: 25LINES   NORMAL    [ VIDEO ] 4000 VLIMIT ! 24 YLIM ! ;
+
+: VGA25   25LINES ;
+: VGA50   50LINES ;
+
+
+DECIMAL
+
+\ -----
+\ BRESENHAM STRAIGHT LINE
+
+VARIABLE x
+VARIABLE y
+
+VARIABLE _SENSE
+VARIABLE SENSE
+
+VARIABLE _DEL
+VARIABLE DEL
+
+: SET   (  x  y -- ) y  !  x  ! ;
+: RSET  ( dx dy -- ) y +!  x +! ;
+
+: DOT   SWAP DUP >R 1- SWAP   x @ y @ PLOT   _DEL @ + DUP DEL @ >
+        IF DEL @ - _SENSE @        ELSE 0 THEN      SENSE @ R> ;
+
+: RLINE ( dx dy -- ) OVER ABS 2*  OVER ABS 2*      2DUP < DUP >R
+        IF DEL ! _DEL ! SWAP       ELSE _DEL ! DEL ! THEN
+        0< 2* 1+ _SENSE !          DUP 0< 2* 1+ SENSE !
+        DUP ABS SWAP ( count )    DUP 0< NOT - ABS ( error )  R>
+        IF   BEGIN DOT WHILE      RSET REPEAT ( more vertical  )
+        ELSE BEGIN DOT WHILE SWAP RSET REPEAT ( more horizontal)
+        THEN 2DROP 2DROP ;
+
+: LINE  (  x  y -- ) SWAP x @ -  SWAP y @ - RLINE ;
+
+
+
+

@@ -1,0 +1,31 @@
+\ -----
+\ new value method for s4
+
+: VALUE
+   0 CONSTANT ;
+
+CODE (TO)
+   BX AX MOV
+   BX POP
+   AX 0 #) MOV
+   END-CODE
+
+CODE (+TO)
+   BX AX MOV
+   BX POP
+   AX 0 #) ADD
+   END-CODE
+
+: TO
+   STATE @ IF     POSTPONE (TO)  ' >BODY HERE PATCH
+           ELSE                  ' >BODY !
+   THEN ; IMMEDIATE
+
+: +TO
+   STATE @ IF     POSTPONE (+TO)  ' >BODY HERE PATCH
+           ELSE                   ' >BODY +!
+   THEN ; IMMEDIATE
+
+: PTR
+   ' >BODY  STATE @ IF  POSTPONE LITERAL  THEN ; IMMEDIATE
+

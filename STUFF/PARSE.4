@@ -1,0 +1,31 @@
+\ given a text stream, its length, and a character -- parse the first
+\ substring delimited by the character, return the address and length
+\ of the substring and the number of characters chopped from the source.
+
+CODE _PARSE ( a len char -- a len' chop )
+               BL AL    MOV      \ delimiter
+                  CX    POP      \ get len of source
+                  DI    POP      \ get address of source
+                  DI    PUSH     \ save address for return
+               DI DX    MOV      \ and keep start offset in dx
+                        REPNE
+                BYTE    SCAS     \ scan for delimiter
+                7 L#    JZ       \ if out because match, goto 7
+                                 \ otherwise, string exausted
+               DX DI    SUB      \ calculate the distance from start to delim
+               DI BX    MOV      \ to return as the string chop count
+                  DI    PUSH
+                6 L#    JU
+7 L:                             \ found delimeter
+               DX DI    SUB      \ calculate the distance from start to delim
+               DI BX    MOV      \ to return as the string chop count
+                  DI    DEC
+                  DI    PUSH
+6 L:                    END-CODE
+
+\ return the substring from the input stream delimited by the character
+
+: PARSE ( char "ccc<char>" -- c-addr u )
+   /SOURCE ROT _PARSE  >IN +! ;
+
+

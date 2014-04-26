@@ -1,0 +1,55 @@
+\ -----  load file to extend the N32 environment
+
+CR .( Loading extensions: ) 
+
+WARNING OFF
+
+ABSENT #OS2 ?\ 0 VIEWS \FORTH\FORTH.4
+ABSENT #OS2 ?\ 1 VIEWS \FORTH\OS2\OS2BIOS.4
+ABSENT #OS2 ?\ 2 VIEWS \FORTH\OS2\OS2CON.4
+ABSENT #OS2 ?\ 3 VIEWS \FORTH\OS2\OS2FILE.4
+
+ABSENT #DOS ?\ 0 VIEWS \FORTH\FORTH.4
+ABSENT #DOS ?\ 1 VIEWS \FORTH\DPMI\DPMIBIOS.4
+ABSENT #DOS ?\ 2 VIEWS \FORTH\DPMI\DPMICON.4
+ABSENT #DOS ?\ 3 VIEWS \FORTH\DPMI\DPMIFILE.4
+
+  CR  .(    miscellaneous )           INCLUDE \FORTH\TOOLS\MISC.4
+  CR  .(    assembler )               INCLUDE \FORTH\TOOLS\ASM32.4
+  CR  .(    values )                  INCLUDE \FORTH\TOOLS\VALUE.4
+  CR  .(    extended syntax strings ) INCLUDE \FORTH\TOOLS\XSTR.4
+  CR  .(    environment queries )     INCLUDE \FORTH\TOOLS\ENV.4
+  CR  .(    floating point )          INCLUDE \FORTH\TOOLS\FLOATS.4
+  
+EXISTS #OS2 [IF]
+  CR  .(    code viewer )             INCLUDE \FORTH\OS2\VIEW.4
+  CR  .(    misc system extensions)   INCLUDE \FORTH\OS2\SYSTEM.4
+  : SYSINIT ;
+[THEN]
+
+EXISTS #DOS [IF]
+  CR  .(    misc system extensions)   INCLUDE \FORTH\DPMI\SYSTEM.4
+  CR  .(    fast video)               INCLUDE \FORTH\DPMI\WIN.4
+  CR  .(    mouse support)            INCLUDE \FORTH\DPMI\MOUSE.4
+  CR  .(    editor)                   INCLUDE \FORTH\DPMI\EDITOR.4
+  : SYSINIT FASTIO [ MICKEY ] INIT-MOUSE ;
+[THEN]  
+
+
+ONLY FORTH ALSO DEFINITIONS
+
+: STARTUP
+   SYSINIT ONLY FORTH ALSO DEFINITIONS ;
+
+' STARTUP 'STARTUP !
+
+INTEGER
+
+MARK STARTUP WARNING ON
+
+SAVE FORTH.X
+
+CR VERSION CR FYI CR
+
+BYE
+

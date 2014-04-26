@@ -1,0 +1,87 @@
+\ SIMPLE TEXT EDITOR FOR A FIXED STRING
+\ -----
+
+VALUE C/L               \ chars per line of users text
+VALUE YOURS             \ points to users text
+VALUE EX                \ the x and
+VALUE EY                \ y coordinates of the cursor anchor
+VALUE CX                \ cursor offset in string, [0..C/L)
+
+CREATE MINE  129 ALLOT
+
+: PREP ( addr # -- )
+   AT? TO EY TO EX  ( #) 128 MIN TO C/L  ( addr) TO YOURS
+   YOURS MINE C/L CMOVE  MINE C/L -TRAILING TO CX DROP ;
+
+
+
+ 
+\ EDITOR SUPPORT ROUTINES
+\ -----
+
+: 'CURSOR ( -- addr )   CX MINE + ;     \ address of cursor
+: 'END ( -- addr )   MINE C/L + 1- ;    \ address of last char in line
+
+: #LAG ( -- n )   C/L CX - ;            \ chars to eol
+: XY   CX EX + EY AT ;                  \ position the cursor
+
+: .LINE   EX EY AT  MINE C/L TYPE ;     \ print entire line
+
+: RIGHT   CX 1+ C/L 1- MIN TO CX ;      \ move cursor right
+: LEFT   CX 1- 0 MAX TO CX ;            \ and left
+: SOL   0 TO CX ;                       \ to far left
+: EOL   MINE C/L -TRAILING TO CX DROP ; \ and to far right
+ 
+\ character manipulation
+\ ----- 
+
+: DELCH                 \ del char at cursor
+   'CURSOR DUP 1+ SWAP #LAG CMOVE  BL 'END C! ;
+
+: INSCH ( ch -- )       \ ins ch at cursor
+   DUP 32 127 WITHIN IF
+      'CURSOR DUP 1+ #LAG CMOVE>  'CURSOR C!  RIGHT
+   ELSE DROP THEN ;
+
+: BACKSP   CX IF LEFT DELCH THEN ;
+: ENTER   MINE YOURS C/L CMOVE  -1 TO CX ;
+: REGET   YOURS MINE C/L CMOVE  EOL ;
+: ESCAPE   REGET  -2 TO CX ;
+: CLEAR   MINE C/L BLANK  0 TO CX ;
+
+
+
+
+
+
+
+
+ 
+\ EDITOR CONTROL FUNCTIONS
+\ ----- 
+
+: DOCHAR ( ekey -- flag )
+       8 CASE BACKSP   0 ESAC
+      27 CASE ESCAPE   1 ESAC
+   $4800 CASE REGET    0 ESAC
+   $5000 CASE CLEAR    0 ESAC
+   $5300 CASE DELCH    0 ESAC
+   $4B00 CASE LEFT     0 ESAC
+   $4D00 CASE RIGHT    0 ESAC
+   $4700 CASE SOL      0 ESAC
+   $4F00 CASE EOL      0 ESAC
+      13 CASE ENTER    1 ESAC
+              INSCH    0 ;
+
+
+\ THE EDITOR ITSELF
+\ ----- 
+ 
+: EDLINE ( addr # -- )
+   PREP BEGIN
+      .LINE XY
+      EKEY DOCHAR
+   UNTIL ;
+
+CREATE JOE 100 ALLOT  JOE 100 BLANK
+

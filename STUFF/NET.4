@@ -1,0 +1,173 @@
+\ new neural net, modeled directly from book
+\ -----
+
+empty
+decimal
+
+include tools.4
+include rnd.4
+include vga.4
+
+\
+\ -----
+
+  2 constant inputs
+
+10 constant rows
+10 constant cols
+
+ rows cols * constant outputs
+
+  inputs array input
+
+ outputs inputs 2array weight
+
+: rc>u ( r c -- unit )
+   swap cols * + ;
+
+: u>rc ( unit -- r c )
+   cols /mod swap ;
+
+\ initialize the weight array
+\ -----
+
+: seeding
+   outputs 0 do
+      inputs 0 do
+         40 s>n  rnd  20 s>n n-  100 s>n n+  j i weight !
+      loop
+   loop ;
+
+\ graph the weight matrix
+\ -----
+
+: show
+   inputs 0 do  i input @ 7 n.r loop cr
+   0 ( unit#)
+   rows 0 do
+      cr cols 0 do  i over + 0 weight @ 8 n.r loop
+      cr cols 0 do  i over + 1 weight @ 8 n.r loop
+      cols +
+   loop drop ;
+
+: rc@y ( r c -- n ) rc>u 0 weight @ ;
+: rc@x ( r c -- n ) rc>u 1 weight @ ;
+
+200 constant scale
+
+scale 4 3 */ constant scr_x      \ screen co-ordinates accounting
+scale        constant scr_y      \ for typical aspect ratio
+
+: xscale ( cols.n -- x )   scale /  scr_x n* ;
+: yscale ( rows.n -- y )   scale /  scr_y n* ;
+
+: xy@ ( row col -- x y )
+   2dup  rc@y yscale >r  rc@x xscale  r> ;
+
+: graph
+   vga
+   rows 1- 0 do
+      cols 1- 0 do
+         j i xy@ set
+         j 1+ i    xy@ line
+         j 1+ i 1+ xy@ line
+         j    i 1+ xy@ line
+         j    i    xy@ line
+      loop
+   loop ;
+
+\
+\ -----
+
+: prop ( unit -- dist_sq )
+   0
+   inputs 0 do ( unit sum)
+      over i weight @  i input @ n-  dup n*  n+
+   loop nip ;
+
+: propagate ( -- unit )
+   0 huge
+   outputs 0 do ( old min)
+      i prop
+      2dup < if   drop
+             else -rot 2drop  i swap
+             then
+   loop drop ;
+
+\ neighborhoods
+\ -----
+
+value hood
+
+value dc
+value dr
+
+value wrow
+value wcol
+
+: neighbor ( r c -- flag )
+   wcol dc -  wcol dc + between >r
+   wrow dr -  wrow dc + between r> and ;
+
+\ updating the weights
+\ -----
+
+value alpha   10 1000 n/ to alpha
+
+value unit
+
+: winner
+   propagate u>rc  to wcol  to wrow ;
+
+: teach
+   0 to unit                  \ the unit in question (output)
+   rows 0 do
+      cols 0 do
+         j i neighbor if
+            inputs 0 do
+               i input @  unit i weight @ -  alpha n*
+               unit i weight +!
+            loop
+         then
+         unit 1+ to unit
+      loop
+   loop ;
+
+\
+\ -----
+
+: r_hood ( -- rmax rmin )   wrow dr + rows min  wrow dr - 0 max ;
+: c_hood ( -- rmax rmin )   wcol dc + cols min  wcol dc - 0 max ;
+
+: teacher
+   r_hood ?do
+      c_hood ?do
+         inputs 0 do
+            k j rc>u i weight
+            i input @  over @ -  alpha n*  swap +!
+         loop
+      loop
+   loop ;
+
+\ training the net
+\ -----
+
+: run ( n -- )
+   0 do
+      i 500 mod 0= if graph then
+      scale rnd s>n  0 input !
+      scale rnd s>n  1 input !
+      winner teach
+      break?
+   loop graph ;
+
+value nr  5000 to nr
+
+: test
+   seeding
+   0 rows 2 /  do
+      i to dc  i to dr
+      nr run
+   -1 +loop ;
+
+

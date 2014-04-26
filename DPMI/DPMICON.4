@@ -1,0 +1,86 @@
+\ -----
+\ key
+
+VARIABLE 1KEY     \ one-key look-ahead buffer.
+     CELL ALLOT   \ pending key, if any.
+
+\ Return true and key if key is available;
+\ otherwise return only false.
+\ Check for key pressed via Int 21h service 6
+\ If key is special, get second key via Int 21h service 7
+\ Special keys are returned in high byte with low byte zeroed
+
+CODE KDOS ( -- key -1 | ? 0)
+                   BX   PUSH    \ save tos
+             $FF # DL   MOV     \ input char
+              6 #  AH   MOV     \ function 6
+             int21 #)   call
+               0 # BX   MOV     \ flag, no char (modified at 1:)
+                 2 L#   JE      \ skip if no char
+                AH AH   SUB     \ clear ah
+                AL AL   OR      \ look at lo byte
+                 1 L#   JNZ     \ if nonzero, go ahead and return it
+               7 # AH   MOV     \ use function 7
+             int21 #)   call
+                AH AH   SUB     \ clear
+                AH AL   XCHG    \ extended char as xxxxNN00
+1 L:          -1 # BX   MOV     \ flag, have char
+2 L:            CX CX   XOR     \ guaranteed zero
+                AH CH   MOV     \ get char into (e)cx padded with zeros
+                AL CL   MOV     \
+                   CX   PUSH    \ and save
+                        END-CODE
+                        NO-EXPAND
+
+\ True if KEY available.
+: _EKEY? ( - f)
+   1Key @ 0= IF  kdos  1Key 2!  THEN  1Key @ ;
+
+\ Receive an environmentally-dependent character.
+: _EKEY ( - ch)
+   BEGIN  _EKEY? UNTIL  1Key CELL+ @  0 1Key ! ;
+
+
+: _KEY? ( -- f )
+   1Key @ 0= IF kdos 1Key 2!  THEN
+   1KEY @ IF
+      1Key CELL+ @  127 AND 0<>
+      DUP 0= IF  1Key OFF  THEN
+      EXIT
+   THEN FALSE ;
+
+\ Receive an environmentally-dependent character.
+\ High-order bits are zeroed.
+: _KEY ( -- char )
+   BEGIN KEY? UNTIL  EKEY 127 AND  ;
+
+: EKEY>CHAR ( echar -- char )
+   DUP 128 < ;
+
+
+
+\ ----- console input
+\ emit
+
+\ Output a character
+| CODE edos ( char -- )
+                BX DX   MOV     \ char into d;
+               2 # AH   MOV     \ write to standard output
+             int21 #)   call
+                   BX   POP     \ AND NEW TOS
+                        END-CODE
+                        NO-EXPAND
+
+: _EMIT ( char -- )
+   1 OUT +! edos ;
+
+1 CONSTANT _EMIT? ( -- flag )
+   
+\ cause subsequent output to appear at the beginning of the next line
+: _CR   13 _EMIT 10 _EMIT  0 OUT ! ;
+
+\ Display a string.
+\ Display of control chars is environmentally-dependent.
+: _TYPE ( ca u)
+   ?DUP IF  BOUNDS DO I C@ _EMIT LOOP EXIT  THEN  DROP ;
+

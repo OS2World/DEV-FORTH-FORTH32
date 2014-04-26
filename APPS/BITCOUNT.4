@@ -1,0 +1,13 @@
+\ From: culter@convex.com (Brad Culter)
+\ ----- 
+
+: count-bits ( uint32 -- numbits )
+   dup $55555555 and swap $aaaaaaaa and 1  rshift +
+   dup $33333333 and swap $cccccccc and 2  rshift +
+   dup $0f0f0f0f and swap $f0f0f0f0 and 4  rshift +
+   dup $00ff00ff and swap $ff00ff00 and 8  rshift +
+   dup $0000ffff and swap $ffff0000 and 10 rshift +
+;
+ 
+
+

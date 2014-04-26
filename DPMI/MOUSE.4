@@ -1,0 +1,143 @@
+\ simple mouse interface thru dpmi
+
+ONLY FORTH ALSO DEFINITIONS
+VOCABULARY MICKEY  MICKEY ALSO DEFINITIONS  VIDEO ALSO
+
+label int33
+        saveregs #) call
+        $300 # ax mov
+         $33 # bx mov
+           0 # cx mov
+       pregs # di mov
+               ds push
+               ds push
+               es pop
+              $31 int
+               ds pop
+       getregs #) call
+                  ret
+                  previous previous also
+
+code mouse_on ( -- ax bx )
+            bx push
+        0 # ax mov
+      int33 #) call
+            ax push
+               end-code
+               no-expand
+
+code show_mouse ( -- )
+             bx push
+         1 # ax mov
+       int33 #) call
+             bx pop
+                end-code
+                no-expand
+
+code hide_mouse ( -- )
+             bx push
+         2 # ax mov
+       int33 #) call
+             bx pop
+                end-code
+                no-expand
+
+code mouse@ ( -- x y button )
+        bx push
+        3 # ax mov
+        int33 #) call
+        $ffff # cx and
+        cx shr
+        cx shr
+        cx shr
+        cx push
+        $ffff # dx and
+        dx shr
+        dx shr
+        dx shr
+        dx push
+        $ffff # bx and
+        end-code
+        no-expand
+
+\ -----
+
+: <WORD ( cursor -- cursor )
+   BEGIN ( a)
+      DUP 0< IF  DROP 0 EXIT THEN
+      DUP FS:C@ BL <> WHILE
+      2-
+   REPEAT  2+ ;
+
+CREATE 1BUT       0 , 0 , 0 ,   \ 1BUT -1: old   0: none   1: wait for release
+CREATE REPEATING  0 , 0 ,       \ repeating on/off and delay for repeat
+
+: mdos ( -- cursor flag )
+   MOUSE@ ( x y button)  DUP 1BUT 2 CELLS + !
+   -ROT XY>CURSOR <WORD SWAP  0<> ;
+
+: CLEAR-BUTTON
+   REPEATING @ IF
+      REPEATING CELL+ @  8 -  0 MAX  REPEATING CELL+ !
+   ELSE
+      REPEATING ON  150 REPEATING CELL+ !
+   THEN
+   REPEATING CELL+ @ MS  0 1BUT ! ;
+
+: _K_EKEY? ( -- flag )
+   1KEY @ ?DUP ?EXIT  kdos 1KEY 2!  1KEY @ ;
+
+: ?RELEASE
+   MOUSE@ -ROT 2DROP IF EXIT THEN  0 1BUT ! ;
+
+: _M_EKEY? ( -- flag )
+   1BUT @ ?DUP IF ( non-zero, do old or wait for release )
+      0< IF ( do old)            TRUE EXIT  THEN
+            ( wait  )  ?RELEASE FALSE EXIT
+   THEN  MDOS TUCK 1BUT 2!  DUP ?EXIT  REPEATING OFF ;
+
+: _K_EKEY ( -- char )
+   1KEY CELL+ @  0 1KEY ! ;
+
+: _M_EKEY ( -- char )
+   1BUT CELL+ @  DUP 2+ FS:C@ BL = IF 1 1BUT ! THEN
+   FS:C@ $10000 OR  2 1BUT CELL+ +! ;
+
+\ -----
+
+: MOUSE_EKEY? ( -- flag )
+   _K_EKEY? ?DUP ?EXIT  _M_EKEY? ;
+
+: MOUSE_EKEY ( -- char )
+   BEGIN
+      _K_EKEY? IF  _K_EKEY EXIT  THEN
+      _M_EKEY? IF  _M_EKEY EXIT  THEN
+   AGAIN ;
+
+: MOUSE_CR
+   HIDE_MOUSE W_CR SHOW_MOUSE ;
+
+: MOUSE_PAGE
+   HIDE_MOUSE W_PAGE SHOW_MOUSE ;
+
+
+: MOUSE_EMIT ( char -- )
+   HIDE_MOUSE W_EMIT SHOW_MOUSE ;
+
+: MOUSE_TYPE ( addr # -- )
+   HIDE_MOUSE W_TYPE SHOW_MOUSE ;
+
+: INIT-MOUSE
+   MOUSE_ON DROP IF
+      ['] MOUSE_EKEY? 'EKEY? !
+      ['] MOUSE_EKEY  'EKEY  !
+      ['] MOUSE_EMIT  'EMIT  !
+      ['] MOUSE_TYPE  'TYPE  !
+      ['] MOUSE_PAGE  'PAGE  !
+      ['] MOUSE_CR    'CR    !
+      SHOW_MOUSE
+   THEN ;
+
+ONLY FORTH ALSO DEFINITIONS
+
+

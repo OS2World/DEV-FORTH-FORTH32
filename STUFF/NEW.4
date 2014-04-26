@@ -1,0 +1,189 @@
+\ new self-organizing map, ala kohonen
+\ -----
+
+decimal empty
+
+include rnd.4
+include tools.4
+include vga.4
+
+decimal
+
+\ the neural matrix
+\ -----
+
+\ the net is organized as a lattice (as opposed to linear or hexagonal)
+\ with a square neighborhood.  it is implemented as a sequential array
+\
+\ virtual weight array is three dimensional,
+\ 2 dimensions for output and one for input
+\    00 01 02 .. 0n
+\    10 11 12 .. 1n
+\    20 21 22 .. 2n
+\     .           .
+\     .           .
+\    m0 m1 m2 .. mn
+
+\ the weight matrix is a 3d array (inputs x rows x cols)
+\ we implement the weight matrix as a 2d array
+
+ 8 constant rows        \ these define the neural outputs
+ 8 constant cols
+ 2 constant inputs      \ the number of inputs (also weights at each node)
+
+rows cols inputs 3array weight   \ the weight matrix
+          inputs  array input    \ the input vector
+
+2variable the_winner    \ row col of the winner of the competition
+
+\ initialize the weight vector with unit random numbers
+\ -----
+
+: seeding
+   rows 0 do
+      cols 0 do
+         inputs 0 do
+            one rnd k j i weight !
+         loop
+      loop
+   loop ;
+
+\ print weights
+\ -----
+
+: show cr
+   rows 0 do
+      ."   / " cols 0 do  j i 0 weight @ 7 n.r loop ."  \" cr
+      ."   \ " cols 0 do  j i 1 weight @ 7 n.r loop ."  /" cr
+   loop ;
+
+
+\ find the winner based on the inputs
+\ -----
+
+: distance ( row col -- distance_sq )
+   0 inputs 0 do    \ row col sum
+      -rot
+      2dup i weight @
+      i input @ swap n- dup n*
+      >r rot r> n+
+   loop -rot 2drop ;
+
+: winner? ( -- row col )
+   0 0 huge
+   rows 0 do
+      cols 0 do
+         j i distance         \ r c min d
+         2dup > if            \ r c min d
+            nip nip nip
+            j i rot
+         else
+            drop
+         then
+      loop
+   loop drop ;
+
+\
+\ -----
+
+: choose
+   inputs 0 do  one rnd  i input !  loop ;
+
+: .distances
+   cr rows 0 do
+      cols 0 do j i distance 8 n.r loop cr
+   loop ;
+
+: .inputs
+   cr inputs 0 do  i input @ n.  loop ;
+
+\
+\ -----
+
+value delta       \ delta from winner to neighborhood
+
+value wc          \ winner's col and
+value wr          \ row
+
+: .winner wr . wc . ;
+
+200 constant alpha
+
+: learns ( r c i -- )
+   dup >r weight r>                 \ a i
+   input @  over @ -  alpha n*      \ a v
+   swap n+! ;
+
+: r_hood ( -- r_hi r_lo )   wr delta + rows min 1+  wr delta - 0 max ;
+: c_hood ( -- c_hi c_lo )   wc delta + cols min 1+  wc delta - 0 max ;
+
+: teach
+   winner? to wc  to wr
+   r_hood ?do
+      c_hood ?do
+         inputs 0 do
+            k j i learns
+         loop
+      loop
+   loop ;
+
+: pound
+   0 rows cols + 4 / do
+      i to delta   cr ." delta " i .
+      10 0 do
+         winner? to wc  to wr
+         .winner
+         teach
+      loop
+   -1 +loop ;
+
+\ show the array as a matrix of xy lines
+\ -----
+
+200 4 3 */ constant scr_x
+200        constant scr_y
+
+: graph
+   0 0 1 weight @ scr_x n*  0 0 0 weight @ scr_y n*  set
+   rows 0 do
+      cols 0 do
+         j i 1 weight @ scr_x n*
+         j i 0 weight @ scr_y n* line
+      loop
+      key? if leave then
+   loop ;
+
+\ training
+\ -----
+
+: train1
+   rows 0 do
+      i rows n/ 0 input !
+      cols 0 do
+         i cols n/ 1 input !
+         pound
+      loop
+      key? if leave then
+   loop ;
+
+: train2
+   200 0 do
+      i .
+      i 15 and 0= if graph then
+      rows 0 do
+         i rows n/ 0 input !
+         cols 0 do
+            i cols n/ 1 input !
+            teach
+         loop
+      loop
+      key? if leave then
+   loop ;
+
+: train
+   vga seeding train1 train2 ;
+
+
+
+
+

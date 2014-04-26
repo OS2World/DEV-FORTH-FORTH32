@@ -1,0 +1,190 @@
+\ self organizing maps
+\ -----
+
+empty
+
+include rnd.4
+include vga.4
+
+\ tools
+\ -----
+
+: under+ ( n1 n2 n3 -- n1+n3 n2 )
+   rot + swap ;
+
+: array ( n "name" -- )
+   create cells allot
+   does> swap cells + ;
+
+: 2array ( x y "name" -- )
+   create  over cells ,  * cells allot
+   does> ( x y base -- addr )
+      dup cell+ >r               \ x y base        \ start
+      @ *                        \ x yoff          \ start
+      swap cells +               \ xyoff           \ start
+      r> + ;                     \ addr
+
+\ the self organizing memory
+\ -----
+
+  2 constant inputs              \ number of input points
+
+ 12 constant rows                \ organize the output space
+ 12 constant cols
+
+rows cols * constant outputs     \ total number of output points
+
+ inputs array input              \ array of input values
+outputs array output             \ and output values
+
+inputs outputs 2array weight     \ the weights connecting them
+
+
+\ initialization of weight array with random values (0..999999)
+\ -----
+
+1000000 constant unity
+
+: seeding
+   inputs 0 do
+      outputs 0 do
+         unity rnd  j i weight !
+      loop
+   loop ;
+
+\ graph the weight array
+\ -----
+
+200 4 3 */ constant scr_x
+200        constant scr_y
+
+: scaled ( n scale -- n' )
+   unity */ ;
+
+: xy@ ( output -- x y )
+   0 over weight @ scr_x scaled  1 rot weight @ scr_y scaled ;
+
+: graph
+   0 xy@ set
+   outputs 1 do
+      i xy@ line
+      key? if leave then
+   loop ;
+
+
+\ data propagation
+\ -----
+
+: prop ( unit -- distance**2 )
+   0 swap
+   inputs 0 do ( sum unit)
+      i input @  over i weight @  -  dup unity */  under+
+   loop drop ;
+
+: propagate ( -- n )
+   -1 $7ffffff             \ winner smallest
+   outputs 0 do            \ winner smallest
+      i prop               \ winner smallest mag
+      2dup > if            \ winner smallest mag      \ new winner
+         -rot 2drop        \ smallest'
+         i swap            \ winner' smallest'
+      else                 \ winner smallest mag
+         drop              \ winner smallest
+      then                 \ winner smallest
+   loop drop ;             \ winner
+
+: go ( -- n )
+   unity rnd 0 input !  unity rnd 1 input !  propagate ;
+
+
+\ updating the weights
+\ -----
+
+: rc ( winner -- r c )
+   cols /mod swap ;
+
+value dc  4 to dc       \ delta col for neighborhood
+value dr  4 to dr       \ delta row for neighborhood
+
+value c_winner
+value r_winner
+
+: c_hood ( -- hi+1 lo )   c_winner dup dc - 0 max  swap dc +  cols min ;
+: r_hood ( -- hi+1 lo )   r_winner dup dr - 0 max  swap dr +  rows min ;
+
+\ return true if rc is in the neighborhood as specified by dr and dc
+\ of the specified winner
+
+: neighbor ( row col -- bool )
+   r_hood between  swap  c_hood between  and ;
+
+\ update the network
+\ -----
+
+3 unity 10 */ constant alpha         \ 0.3 is the alpha constant
+
+: upd ( -- n )
+   0
+   r_hood swap ?do
+      c_hood swap ?do
+         j cols * i + ( neighbor's unit number)
+         inputs 0 do ( unit)
+            i over weight
+            i input @  over @ -  alpha unity */  swap +!
+         loop drop
+         1+
+      loop
+   loop ;
+
+: x
+   go  rc  to c_winner  to r_winner ;
+
+: update ( -- n )
+   propagate  rc  to c_winner  to r_winner  upd ;
+
+\ training the network
+\ -----
+
+: train_point
+   0 begin ( timer)
+      key? if drop exit then
+      update 1 > while
+      1+
+      dup 10 mod 0= if
+         dc 1- 0 max to dc
+         dr 1- 0 max to dr
+      then
+   repeat drop ;
+
+: choose
+   unity rnd 0 input !  unity rnd 1 input ! ;
+
+100 constant np
+
+: init
+   seeding  seed @ seed cell+ ! ;
+
+: train1
+   seed cell+ @ seed !
+   cr  np 0 do
+      i .
+      rows 2/ to dr
+      cols 2/ to dc
+      choose
+      train_point
+      key? if leave then
+   loop ;
+
+: train2
+   seed cell+ @ seed !
+   cr  1000 0 do
+      i .
+      np 0 do
+         choose
+         update drop
+      loop
+      key? if leave then
+   loop ;
+
+: test
+   init train1 train2 ;

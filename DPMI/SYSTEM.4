@@ -1,0 +1,8 @@
+
+: MS ( n -- )
+   ?DUP IF
+      182065 10000000 */ $46C GS:@ +
+      BEGIN  DUP  $46C GS:@ - 0<  UNTIL  DROP
+   THEN ;
+
+: AT-XY ( x y -- ) AT ;

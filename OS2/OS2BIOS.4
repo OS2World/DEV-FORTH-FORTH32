@@ -1,0 +1,346 @@
+
+\ OS2 CALLS AS DEFINING WORDS
+\ ----- 
+
+VARIABLE DOSVECTORS
+VARIABLE 'CMDLINE
+VARIABLE 'ENVIRONMENT
+VARIABLE MODHANDLE
+
+LABEL DO_DOSAPI
+   DI POP                  \ get pointer to offset
+   4 [DI] AX MOV           \ get stack adjustment value
+   AX PUSH                 \ save on "return" stack
+   0 [DI] DI MOV           \ get caller offset
+   DOSVECTORS #) DI ADD    \ add to the vector base, forming call address
+   BP SP XCHG              \ swap stacks so data is in right place
+   BX PUSH                 \ and force all data into memory
+   0 [DI] CALL             \ and call the os2 interface 
+   AX BX MOV               \ return as tos
+   BP SP XCHG              \ swap stacks back
+   AX POP                  \ get stack adjustment
+   AX BP ADD               \ adjust the stack
+   RET                     \ and return
+
+LABEL DO_DOS16API
+   DI POP                  \ get pointer to offset
+   4 [DI] AX MOV           \ get stack adjustment value
+   AX PUSH                 \ save on "return" stack
+   0 [DI] DI MOV           \ get caller offset
+   DOSVECTORS #) DI ADD    \ add to the vector base, forming call address
+   BP SP XCHG              \ swap stacks so data is in right place
+   BX PUSH                 \ and force all data into memory
+   0 [DI] CALL             \ and call the os2 interface 
+   AX BX MOV               \ return as tos
+   $FFFF # BX AND          \ mask for 16 bit return
+   BP SP XCHG              \ swap stacks back
+   AX POP                  \ get stack adjustment
+   AX BP ADD               \ adjust the stack
+   RET                     \ and return
+
+\ os2 dos interface calls, see RUN.ASM for concise reference
+\ -----
+
+
+  0  2 doscall DOSBEEP                        \ freq dur
+  1  2 doscall DOSEXIT                        \ action result
+  2  5 doscall DOSCREATETHREAD                \ ptid pfn param flag cbStack
+  3  1 doscall DOSRESUMETHREAD                \ tid
+  4  1 doscall DOSSUSPENDTHREAD               \ tid
+  5  2 doscall DOSGETINFOBLOCKS               \ *pptib *pppib
+  6  1 doscall DOSKILLTHREAD                  \ tid
+  7  5 doscall DOSWAITCHILD                   \ action option pres ppid pid
+  8  2 doscall DOSWAITTHREAD                  \ ptid option
+  9  1 doscall DOSSLEEP                       \ msec
+ 10  1 doscall DOSDEBUG                       \ pdbgbuf
+ 11  0 doscall DOSENTERCRITSEC                \
+ 12  0 doscall DOSEXITCRITSEC                 \
+ 13  2 doscall DOSEXITLIST                    \ ordercode pfn
+ 14  7 doscall DOSEXECPGM                     \ pObjname cbObjname execFlag pArg pEnv pRes pName
+ 15  4 doscall DOSSETPRIORITY                 \ scope prtyclass delta PorTid
+ 16  2 doscall DOSKILLPROCESS                 \ action pid
+ 17  5 doscall DOSSETFILELOCKS                \ hFile pflUnlock pflLock timeout flags
+ 18  2 doscall DOSCANCELLOCKREQUEST           \ hFile pflLock
+ 19  8 doscall DOSOPEN                        \ pszFileName pHf pulAction cbFile ulAttribute fsOpenFlags fsOpenMode peaop2
+ 20  1 doscall DOSCLOSE                       \ hFile
+ 21  4 doscall DOSREAD                        \ hFile pBuffer cbRead pcbActual
+ 22  4 doscall DOSWRITE                       \ hFile pBuffer cbWrite pcbActual
+ 23  1 doscall DOSDELETE                      \ pszFile
+ 24  1 doscall DOSFORCEDELETE                 \ pszFile
+ 25  2 doscall DOSDUPHANDLE                   \ hFile pHfile
+ 26  2 doscall DOSQUERYFHSTATE                \ hFile pMode
+ 27  2 doscall DOSSETFHSTATE                  \ hFile mode
+ 28  3 doscall DOSQUERYHTYPE                  \ hFile pType pAttr
+ 29  7 doscall DOSFINDFIRST                   \ pszFileSpec phdir flAttribute pfindbuf cbBuf pcFileNames ulInfoLevel
+ 30  4 doscall DOSFINDNEXT                    \ hDir pfindbuf cbfindbuf pcFilenames
+ 31  1 doscall DOSFINDCLOSE                   \ hDir
+ 32  5 doscall DOSFSATTACH                    \ pszDevice pszFilesystem pData cbData flag
+ 33  5 doscall DOSQUERYFSATTACH               \ pszDeviceName ulOrdinal ulFSAInfoLevel pfsqb pcbBuffLength
+ 34 10 doscall DOSFSCTL                       \ pData cbData pcbData pParms cbParms pcbParms function pszRoute hFile method
+ 35  2 doscall DOSSETFILESIZE                 \ hFile cbSize
+ 36  1 doscall DOSRESETBUFFER                 \ hFile
+ 37  4 doscall DOSSETFILEPTR                  \ hFile ib method ibActual
+ 38  2 doscall DOSMOVE                        \ pszOld pszNew
+ 39  3 doscall DOSCOPY                        \ pszOld pszNew option
+ 40  5 doscall DOSEDITNAME                    \ metalevel pszSource pszEdit pszTarget cbTarget
+ 41  2 doscall DOSCREATEDIR                   \ pszDirName peaop2
+ 42  1 doscall DOSDELETEDIR                   \ pszDir
+ 43  1 doscall DOSSETDEFAULTDISK              \ disknum
+ 44  2 doscall DOSQUERYCURRENTDISK            \ pdisknum plogical
+ 45  1 doscall DOSSETCURRENTDIR               \ pszDir
+ 46  3 doscall DOSQUERYCURRENTDIR             \ disknum pBuf pcbBuf
+ 47  4 doscall DOSQUERYFSINFO                 \ disknum infolevel pBuf cbBuf
+ 48  4 doscall DOSSETFSINFO                   \ disknum infolevel pBuf cbBuf
+ 49  1 doscall DOSQUERYVERIFY                 \ pBool
+ 50  1 doscall DOSSETVERIFY                   \ value
+ 51  1 doscall DOSSETMAXFH                    \ cFH
+ 52  2 doscall DOSSETRELMAXFH                 \ pcbReqCount pcbCurMaxFH
+ 53  4 doscall DOSQUERYFILEINFO               \ hf ulInfoLevel pInfo cbInfoBuf
+ 54  4 doscall DOSSETFILEINFO                 \ hf ulInfoLevel pInfoBuf cbInfoBuf
+ 55  4 doscall DOSQUERYPATHINFO               \ pszPathName ulInfoLevel pInfoBuf cbInfoBuf
+ 56  5 doscall DOSSETPATHINFO                 \ pszPathName ulInfoLevel pInfoBuf cbInfoBuf flOptions
+ 57  1 doscall DOSSHUTDOWN                    \ ulReserved
+ 58  7 doscall DOSENUMATTRIBUTE               \ ulRefType pvFile ulEntry pvBuf cbBuf pulCount ulInfoLevel
+ 59  3 doscall DOSALLOCMEM                    \ ppb cb flag
+ 60  1 doscall DOSFREEMEM                     \ pb
+ 61  3 doscall DOSSETMEM                      \ pb cb flag
+ 62  3 doscall DOSGIVESHAREDMEM               \ pb pid flag
+ 63  2 doscall DOSGETSHAREDMEM                \ pb flag
+ 64  3 doscall DOSGETNAMEDSHAREDMEM           \ ppb pszName flag
+ 65  4 doscall DOSALLOCSHAREDMEM              \ ppb pszName cb flag
+ 66  3 doscall DOSQUERYMEM                    \ pb pcb pFlag
+ 67  3 doscall DOSSUBALLOCMEM                 \ pbBase ppb cb
+ 68  3 doscall DOSSUBFREEMEM                  \ pbBase pb cb
+ 69  3 doscall DOSSUBSETMEM                   \ pbBase flag cb
+ 70  1 doscall DOSSUBUNSETMEM                 \ pbBase
+ 71  4 doscall DOSCREATEEVENTSEM              \ pszName phev flAttr fState
+ 72  2 doscall DOSOPENEVENTSEM                \ pszName phev
+ 73  1 doscall DOSCLOSEEVENTSEM               \ hev
+ 74  2 doscall DOSRESETEVENTSEM               \ hev pulPostCt
+ 75  1 doscall DOSPOSTEVENTSEM                \ hev
+ 76  2 doscall DOSWAITEVENTSEM                \ hev ulTimeout
+ 77  2 doscall DOSQUERYEVENTSEM               \ hev pulPostCt
+ 78  4 doscall DOSCREATEMUTEXSEM              \ pszName phmtx flAttr fState
+ 79  2 doscall DOSOPENMUTEXSEM                \ pszName phmtx
+ 80  1 doscall DOSCLOSEMUTEXSEM               \ hmtx
+ 81  2 doscall DOSREQUESTMUTEXSEM             \ hmtx ulTimeout
+ 82  1 doscall DOSRELEASEMUTEXSEM             \ hmtx
+ 83  4 doscall DOSQUERYMUTEXSEM               \ hmtx *ppid *ptid pulCount
+ 84  5 doscall DOSCREATEMUXWAITSEM            \ pszName phmux cSemRec pSemRec flAttr
+ 85  2 doscall DOSOPENMUXWAITSEM              \ pszName phmux
+ 86  1 doscall DOSCLOSEMUXWAITSEM             \ hmux
+ 87  3 doscall DOSWAITMUXWAITSEM              \ hmux ulTimeout pulUser
+ 88  2 doscall DOSADDMUXWAITSEM               \ hmux pSemRec
+ 89  2 doscall DOSDELETEMUXWAITSEM            \ hmux hSem
+ 90  4 doscall DOSQUERYMUXWAITSEM             \ hmux pcSemRec pSemRec pflAttr
+ 91  1 doscall DOSGETDATETIME                 \ pdt
+ 92  1 doscall DOSSETDATETIME                 \ pdt
+ 93  3 doscall DOSASYNCTIMER                  \ msec hsem phtimer
+ 94  3 doscall DOSSTARTTIMER                  \ msec hsem phtimer
+ 95  1 doscall DOSSTOPTIMER                   \ htimer
+ 96  4 doscall DOSLOADMODULE                  \ pszName cbName pszModname phmod
+ 97  1 doscall DOSFREEMODULE                  \ hmod
+ 98  4 doscall DOSQUERYPROCADDR               \ hmod ordinal pszName ppfn
+ 99  2 doscall DOSQUERYMODULEHANDLE           \ pszModname phmod
+100  3 doscall DOSQUERYMODULENAME             \ hmod cbName pch
+101  4 doscall DOSQUERYPROCTYPE               \ hmod ordinal pszName pulproctype
+102  4 doscall DOSGETRESOURCE                 \ hmod idType idName ppb
+103  1 doscall DOSFREERESOURCE                \ pb
+104  4 doscall DOSQUERYRESOURCESIZE           \ hmod idt idn pulsize
+105  4 doscall DOSQUERYCTRYINFO               \ cb pcc pci pcbActual
+106  3 doscall DOSQUERYDBCSENV                \ cb pcc pBuf
+107  3 doscall DOSMAPCASE                     \ cb pcc pch
+108  4 doscall DOSQUERYCOLLATE                \ cb pcc pch pcch
+109  3 doscall DOSQUERYCP                     \ cb arCP pcCP
+110  1 doscall DOSSETPROCESSCP                \ cp
+111  1 doscall DOSSETEXCEPTIONHANDLER         \ pERegRec
+112  1 doscall DOSUNSETEXCEPTIONHANDLER       \ pERegRec
+113  1 doscall DOSRAISEEXCEPTION              \ pexcept
+114  2 doscall DOSSENDSIGNALEXCEPTION         \ pid exception
+115  3 doscall DOSUNWINDEXCEPTION             \ phandler pTargetIP pERepRec
+116  2 doscall DOSSETSIGNALEXCEPTIONFOCUS     \ flag pulTimes
+117  1 doscall DOSENTERMUSTCOMPLETE           \ pulNesting
+118  1 doscall DOSEXITMUSTCOMPLETE            \ pulNesting
+119  1 doscall DOSACKNOWLEDGESIGNALEXCEPTION  \ ulSignalNum
+120  3 doscall DOSCREATEPIPE                  \ phfRead phfWrite cb
+121  1 doscall DOSCLOSEQUEUE                  \ hq
+122  3 doscall DOSCREATEQUEUE                 \ phq priority pszName
+123  3 doscall DOSOPENQUEUE                   \ ppid phq pszName
+124  8 doscall DOSPEEKQUEUE                   \ hq pRequest pcbData ppbuf element nowait ppriority hsem
+125  1 doscall DOSPURGEQUEUE                  \ hq
+126  2 doscall DOSQUERYQUEUE                  \ hq pcbEntries
+127  8 doscall DOSREADQUEUE                   \ hq pRequest pcbData ppbuf element wait ppriority hsem
+128  5 doscall DOSWRITEQUEUE                  \ hq request cbData pbData priority
+129  1 doscall DOSERROR                       \ error
+130  7 doscall DOSGETMESSAGE                  \ pTable cTable pBuf cbBuf msgnumber pszFile pcbMsg
+131  4 doscall DOSERRCLASS                    \ code pClass pAction pLocus
+132  7 doscall DOSINSERTMESSAGE               \ pTable cTable pszMsg cbMsg pBuf cbBuf pcbMsg
+133  3 doscall DOSPUTMESSAGE                  \ hfile cbMsg pBuf
+134  4 doscall DOSQUERYSYSINFO                \ iStart iLast pBuf cbBuf
+135  2 doscall DOSSCANENV                     \ pszName *ppszValue
+136  5 doscall DOSSEARCHPATH                  \ flag pszPathOrName pszFilename pBuf cbBuf
+137  4 doscall DOSQUERYMESSAGECP              \ pb cb pszFilename cbBuf
+138  2 doscall DOSQUERYRASINFO                \ Index Addr
+139  3 doscall DOSSTARTSESSION                \ psd pidSession ppid
+140  2 doscall DOSSETSESSION                  \ idSession psd
+141  1 doscall DOSSELECTSESSION               \ idSession
+142  2 doscall DOSSTOPSESSION                 \ scope idSession
+143  2 doscall DOSQUERYAPPTYPE                \ pszName pFlags
+144  2 doscall DOSDEVCONFIG                   \ pdevinfo item
+145  9 doscall DOSDEVIOCTL                    \ hDevice category function pParams cbParmLenMax pcbParmLen pData cbDataLenMax pcbDataLen
+146  5 doscall DOSPHYSICALDISK                \ function pBuf cbBuf pParams cbParams
+147  7 doscall DOSCALLNPIPE                   \ pszName pInbuf cbIn pOutbuf cbOut pcbActual msec
+148  1 doscall DOSCONNECTNPIPE                \ hpipe
+149  1 doscall DOSDISCONNECTNPIPE             \ hpipe
+150  7 doscall DOSCREATENPIPE                 \ pszName pHpipe openmode pipemode cbInbuf cbOutbuf msec
+151  6 doscall DOSPEEKNPIPE                   \ hpipe pBuf cbBuf pcbActual pAvail pState
+152  2 doscall DOSQUERYNPHSTATE               \ hpipe pState
+153  4 doscall DOSQUERYNPIPEINFO              \ hpipe infolevel pBuf cbBuf
+154  3 doscall DOSQUERYNPIPESEMSTATE          \ hsem pnpss cbBuf
+155  4 doscall DOSRAWREADNPIPE                \ pszName cb pLen pBuf
+156  2 doscall DOSRAWWRITENPIPE               \ pszName cb
+157  2 doscall DOSSETNPHSTATE                 \ hpipe state
+158  3 doscall DOSSETNPIPESEM                 \ hpipe hsem key
+159  6 doscall DOSTRANSACTNPIPE               \ hpipe pOutbuf cbOut pInbuf cbIn pcbRead
+160  2 doscall DOSWAITNPIPE                   \ pszName msec
+161  1 doscall DOSTMRQUERYFREQ                \ pulTmrFreq
+162  1 doscall DOSTMRQUERYTIME                \ pqwTmrTime
+163  3 doscall DOSREGISTERPERFCTRS            \ pbDataBlk pbTextBlk flFlags
+164  2 doscall DOSOPENVDD                     \ pszVDD phvdd
+165  7 doscall DOSREQUESTVDD                  \ hvdd sgid cmd cbInput pInput cbOutput pOutput
+166  1 doscall DOSCLOSEVDD                    \ hvdd
+167  4 doscall DOSQUERYDOSPROPERTY            \ sgid pszName cb pch
+168  4 doscall DOSSETDOSPROPERTY              \ sgid pszName cb pch
+
+
+\ dos16:
+169  3 dos16call KBDCHARIN            \ pkbci fWait hkbd 
+170  1 dos16call KBDCLOSE             \ hkbd 
+171  0 dos16call KBDDEREGISTER        \ 
+172  1 dos16call KBDFLUSHBUFFER       \ hkbd 
+173  1 dos16call KBDFREEFOCUS         \ hkbd 
+174  3 dos16call KBDGETCP             \ ulReserved pidCodePage hkbd 
+175  2 dos16call KBDGETFOCUS          \ fWait hkbd 
+176  2 dos16call KBDGETSTATUS         \ pkbstKbdInfo hkbd 
+177  1 dos16call KBDOPEN              \ phkbd 
+178  2 dos16call KBDPEEK              \ pkbciKeyInfo hkbd 
+179  3 dos16call KBDREGISTER          \ pszModuleName pszEntryName fFunctions 
+180  3 dos16call KBDSETCP             \ ulReserved idCodePage hkbd 
+181  2 dos16call KBDSETCUSTXT         \ pulTransTbl hkbd 
+182  0 dos16call KBDSETFGND           \ 
+183  2 dos16call KBDSETSTATUS         \ pkbstKbdInfo hkbd 
+184  4 dos16call KBDSTRINGIN          \ pchBuffer psibLength fWait hkbd 
+185  1 dos16call KBDSYNCH             \ fwait 
+186  3 dos16call KBDXLATE             \ pkbxlKeyStroke hkbd 
+187  1 dos16call MOUCLOSE             \ hmou 
+188  0 dos16call MOUDEREGISTER        \ 
+189  1 dos16call MOUDRAWPTR           \ hmou 
+190  1 dos16call MOUFLUSHQUE          \ hmou 
+191  2 dos16call MOUGETDEVSTATUS      \ pfsDevStatus hmou 
+192  2 dos16call MOUGETEVENTMASK      \ pfuEvents hmou 
+193  2 dos16call MOUGETNUMBUTTONS     \ pulButtons hmou 
+194  2 dos16call MOUGETNUMMICKEYS     \ pulMickeys hmou 
+195  2 dos16call MOUGETNUMQUEEL       \ pmouqi hmou 
+196  2 dos16call MOUGETPTRPOS         \ pmouplPosition hmou 
+197  3 dos16call MOUGETPTRSHAPE       \ pbBuffer pmoupsinfo hmou 
+198  2 dos16call MOUGETSCALEFACT      \ pmouseFactors hmou 
+199  1 dos16call MOUINITREAL          \ pszDriverName 
+200  2 dos16call MOUOPEN              \ pszDriverName phmou 
+201  3 dos16call MOUREADEVENTQUE      \ pmouevEvent pfWait hmou 
+202  3 dos16call MOUREGISTER          \ pszModuleName pszEntryName flFunctions 
+203  2 dos16call MOUREMOVEPTR         \ pmourtRect hmou 
+204  2 dos16call MOUSETEVENTMASK      \ pfuEvents hmou 
+205  2 dos16call MOUSETPTRPOS         \ pmouplPosition hmou 
+206  3 dos16call MOUSETPTRSHAPE       \ pbBuffer pmouplInfo hmou 
+207  2 dos16call MOUSETSCALEFACT      \ pmouscFactors hmou 
+208  1 dos16call MOUSYNCH             \ fWait 
+209  2 dos16call VIOASSOCIATE         \ hdc hvps 
+210  4 dos16call VIOCREATELOGFONT     \ pfat lcid pstr8Name hvps 
+211  6 dos16call VIOCREATEPS          \ phvps cRows cColumns fFormat cAttrBytes hvps 
+212  2 dos16call VIODELETESETID       \ lcid hvps 
+213  0 dos16call VIODEREGISTER        \ 
+214  1 dos16call VIODESTROYPS         \ hvps 
+215  1 dos16call VIOENDPOPUP          \ hvio 
+216  2 dos16call VIOGETANSI           \ pfAnsi hvio 
+217  3 dos16call VIOGETBUF            \ pulLVB pcbLVB hvio 
+218  3 dos16call VIOGETCONFIG         \ ulReserved pvioin hvio 
+219  3 dos16call VIOGETCP             \ ulReserved pidCodePage hvio 
+220  3 dos16call VIOGETCURPOS         \ pulRow pulColumn hvio 
+221  2 dos16call VIOGETCURTYPE        \ pvicciCursor hvio 
+222  3 dos16call VIOGETDEVICECELLSIZE \ pcRows pcColumns hvps 
+223  2 dos16call VIOGETFONT           \ pviofi hvio 
+224  2 dos16call VIOGETMODE           \ pviomi hvio 
+225  3 dos16call VIOGETORG            \ plRow plColumn hvps 
+226  2 dos16call VIOGETPHYSBUF        \ pviopb ulReserved 
+227  2 dos16call VIOGETSTATE          \ pvoidState hvio 
+228  3 dos16call VIOMODEUNDO          \ fRelinquish fTerminate hvio 
+229  3 dos16call VIOMODEWAIT          \ fEvent pfNotify hvio 
+230  2 dos16call VIOPOPUP             \ pfWait hvio 
+231  1 dos16call VIOPRTSC             \ hvio 
+232  1 dos16call VIOPRTSCTOGGLE       \ hvio 
+233  7 dos16call VIOQUERYFONTS        \ pcbMetrics pfm cbMetrics pcFonts pszFacename flOptions hvps 
+234  5 dos16call VIOQUERYSETIDS       \ palcids pachNames palTypes cSets hvps 
+235  5 dos16call VIOREADCELLSTR       \ pchCellString pcb ulRow ulColumn hvio 
+236  5 dos16call VIOREADCHARSTR       \ pchString pcb ulRow ulColumn hvio 
+237  4 dos16call VIOREGISTER          \ pszModuleName pszEntryName flFunction1 flFunction2 
+238  3 dos16call VIOSAVREDRAWUNDO     \ fRelinquish fTerminate hvio 
+239  3 dos16call VIOSAVREDRAWWAIT     \ fEvent pfNotify ulReserved 
+240  3 dos16call VIOSCRLOCK           \ fWait pfNotLocked hvio 
+241  6 dos16call VIOSCROLLDN          \ TopRow LeftCol BotRow RtCol cbLines pbCellULONG hvio 
+242  6 dos16call VIOSCROLLLF          \ TopRow LeftCol BotRow RtCol cbLines pbCellULONG hvio 
+243  6 dos16call VIOSCROLLRT          \ TopRow LeftCol BotRow RtCol cbLines pbCellULONG hvio 
+244  6 dos16call VIOSCROLLUP          \ Top Left Bot Rt Lines Cell hvio 
+245  1 dos16call VIOSCRUNLOCK         \ hvio 
+246  2 dos16call VIOSETANSI           \ fAnsi hvio 
+247  3 dos16call VIOSETCP             \ ulReserved idCodePage hvio 
+248  3 dos16call VIOSETCURPOS         \ ulrow ulcol hvio 
+249  2 dos16call VIOSETCURTYPE        \ pvicci hvio 
+250  3 dos16call VIOSETDEVICECELLSIZE \ cRows cColumns hvps 
+251  2 dos16call VIOSETFONT           \ pviofi hvio 
+252  2 dos16call VIOSETMODE           \ pvioMi hvio 
+253  3 dos16call VIOSETORG            \ sRow sColumn hvps 
+254  2 dos16call VIOSETSTATE          \ pvoidState hvio 
+255  3 dos16call VIOSHOWBUF           \ offLVB cbOutput hvio 
+256  4 dos16call VIOSHOWPS            \ cRows cColumns off hvps 
+257  5 dos16call VIOWRTCELLSTR        \ pchCellString cbCellString Row Col hvio
+258  5 dos16call VIOWRTCHARSTR        \ pchString cbString Row Col hvio
+259  5 dos16call VIOWRTCHARSTRATT     \ pchString cbString Row Col hvio
+260  5 dos16call VIOWRTNATTR          \ pbAttr cb Row Col hvio
+261  5 dos16call VIOWRTNCELL          \ pbCell cb Row Col hvio
+262  5 dos16call VIOWRTNCHAR          \ pbChar cb Row Col hvio
+263  3 dos16call VIOWRTTTY            \ pchString cbString hvio
+
+\ the most primitive way to exit a dos program
+
+: BYE   0 0 DOSEXIT ;
+
+
+CREATE T&D   8 ALLOT
+
+: TIME&DATE ( -- sec min hour day mon year )
+   T&D DOSGETDATETIME DROP
+   T&D 2+ C@  T&D 1+ C@ T&D C@   \ s m h
+   T&D 4 + C@  T&D 5 + C@  T&D 6 + H@ ;
+
+\ -----
+
+: CMDLINE ( -- addr n )
+   'CMDLINE @ ZCOUNT + 1+ ZCOUNT ;
+
+: CMDNAME ( -- addr n )
+   'CMDLINE @ ZCOUNT ;
+   
+: ALLOCATE ( #bytes -- addr ior )
+   $13  OVER CELL+  PAD  DOSALLOCMEM ( #bytes ior)
+   ?DUP ?EXIT ( error, leave x-addr ior)
+   PAD @ ! ( put size at head)  PAD @ CELL+ 0 ;
+
+: FREE ( addr -- ior )
+   CELL- DOSFREEMEM ;
+
+: RESIZE ( addr u -- addr ior )
+   ALLOCATE ?DUP IF NIP EXIT THEN ( error)
+   ( addr1 addr2)
+   2DUP  OVER CELL- @  OVER CELL- @  MIN  CMOVE
+   SWAP FREE DROP 0 ;
+

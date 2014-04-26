@@ -1,0 +1,559 @@
+\ 32-bit 8086 Assembler.  Based on F83 assembler.
+
+: BETWEEN ( n lo hi -- flag )   1+ WITHIN ;
+
+only forth also definitions
+
+vocabulary assembler
+
+ONLY FORTH ALSO DEFINITIONS
+
+\ The 8086 Assembler was written by Mike Perry, and modified for
+\ 32-bit 386/486 use by Mitch Bradley and again by Rick VanNorman
+\ To create an assembler language definition, use the defining
+\ word CODE.  It must be terminated with either END-CODE or
+\ its synonym C;.  How the assembler operates is a very
+\ interesting example of the power of CREATE DOES>   Basically
+\ the instructions are categorized and a defining word is
+\ created for each category.  When the nmemonic for the
+\ instruction is interpreted, it compiles itself.
+
+ASSEMBLER ALSO DEFINITIONS
+
+\ Deferring the definitions of the commas
+\   allows the same assembler to serve for both the system and the
+\   Meta-Compiler.
+
+DEFER ASM8!       FORTH ' C!       ASSEMBLER IS ASM8!
+DEFER ahere       FORTH ' HERE     ASSEMBLER IS ahere
+DEFER ASM-ALLOT   FORTH ' ALLOT    ASSEMBLER IS ASM-ALLOT
+
+: asm8,   ( n -- )  $ff and  ahere  1 asm-allot  asm8!  ;
+: asm16,  ( n -- )  dup asm8,  bflip asm8,  ;
+: asm32,  ( n -- )  dup asm16,  flip asm16, ;
+
+OCTAL
+\ BIG?  tests offsets size. True if won't fit in one byte.
+: BIG?   ( N -- F )   -200 177 BETWEEN 0=  ;
+
+\ aborts if relative distance is too far.
+: ?LONG ( o )   BIG? NOT HUH? ;
+
+DECIMAL
+\ ----- Local labels
+
+20 CONSTANT MXL#
+
+\ unresolved fwd reference associative stack.  Emptied by READY.
+\ Associate stacks can be "popped" from the middle, or wherever
+\ the key is found.
+CREATE FWDS
+   2 CELLS ALLOT  ( pointers)
+   MXL# 2 * CELLS ALLOT  ( pairs)
+
+\ resolved label value array.  Cleared by READY.
+CREATE BWDS
+   MXL# CELLS ALLOT
+
+\ pushes unresolved reference.
+: LPUSH ( value=here' key=label#)
+   FWDS 2@ = 0= HUH? ( full?)  FWDS  @ 2!  2 CELLS FWDS +! ;
+
+\ pops any unresolved references.
+: LPOP  ( key=label# - value=addr true | key 0)
+   >R  FWDS @  FWDS 2 CELLS + BEGIN ( end start)
+      2DUP = 0= WHILE
+      DUP @  R@ = IF ( foun2!)
+         DUP CELL+ @ ( addr) >R
+         SWAP 2 CELLS -  DUP FWDS !  2@ ROT 2!  \ promote last pair
+         R> R> ( addr key)  -1 OR  ( addr true)  EXIT
+      THEN
+      2 CELLS +
+   REPEAT  2DROP  R> 0 ;
+
+\ returns the address of the label n or 0 if unresolved.
+: L? ( n - a | 0)   DUP MXL# U< HUH?  CELLS  BWDS + @ ;
+
+\ assigns HERE to label n-1.  Resolves any forward references.
+\ Assumes 8-bit relative displacements.
+: L: ( n - a)
+   DUP L? 0= HUH?  ( should be unknown)
+   ahere  OVER CELLS BWDS + !     ( now known)
+   BEGIN  DUP LPOP  ( a -1 | n 0)
+   WHILE  ahere OVER - 1-  TUCK  ?LONG  ASM8!  ( resolve ref)
+   REPEAT  2DROP ;
+
+: L# ( n - a )   \ retrieves the value of label n-1.
+   DUP L?  ?DUP 0=
+   IF  ahere 1+ 2DUP SWAP  LPUSH  THEN  NIP ;
+
+\ -----
+
+\ Like many CPUs, the 8086 uses many 3 bit fields in its opcodes
+\ This makes octal ( base 8 ) natural for describing the registers
+OCTAL
+
+\ On the 8086, register names are cleverly defined constants.
+
+\ The value returned by registers and by modes such as #) contains
+\ both mode and register information. The instructions use the
+\ mode information to decide how many arguments exist, and what to
+\ assemble.
+
+: REG    11 *  SWAP 1000 * OR  CONSTANT  ;
+: REGS   ( MODE N -- )   SWAP 0 DO  DUP I REG  LOOP  DROP ;
+
+10 0 REGS     AL    CL    DL    BL    AH    CH    DH    BH
+10 1 REGS    EAX   ECX   EDX   EBX   ESP   EBP   ESI   EDI
+10 1 REGS     AX    CX    DX    BX    SP    BP    SI    DI
+10 2 REGS   [EAX] [ECX] [EDX] [EBX] [ESP] [EBP] [ESI] [EDI]
+10 2 REGS    [AX]  [CX]  [DX]  [BX]  [SP]  [BP]  [SI]  [DI]
+ 6 3 REGS   ES    CS    SS    DS    FS    GS
+ 3 4 REGS   #     #)    S#)
+
+\ Missing registers don't exist
+ 5 0 reg cr0               5 2 reg cr2  5 3 reg cr3
+ 6 0 reg dr0  6 1 reg dr1  6 2 reg dr2  6 3 reg dr3  6 6 reg dr6  6 7 reg dr7
+                                                     7 6 reg tr6  7 7 reg tr7
+
+\ Note! the "disp [ESP]" mode doesn't exist.  That encoding is used
+\ for the scaled-index mode.
+
+10 1 REGS     /0    /1    /2    /3    /4    /5    /6    /7
+
+\ MD  defines words which test for various modes.
+: MD   CREATE  1000 * ,  DOES>  @ SWAP 7000 AND =  ;
+
+\ R8? R16? MEM? SEG? #?  test for mode equal to 0 thru 4.
+0 MD R8?   1 MD R16?   2 MD MEM?   3 MD SEG?   4 MD #?
+
+: spec?  ( n -- f )  [ also forth ] 7000 and 5000 >=  [ previous ]  ;
+
+\ REG?  tests for any register mode
+: REG?   ( n -- f )   7000 AND 2000 <  ;
+
+\ RLOW  mask off all but low register field.
+: RLOW   ( n1 -- n2 )    7 AND ;
+
+\ RMID  mask off all but middle register field.
+: RMID   ( n1 -- n2 )   70 AND ;
+
+\ SIZE  true for 32 bit, false for 8 bit.
+VARIABLE SIZE   SIZE ON
+
+\ BYTE  set size to 8 bit.
+: BYTE   ( -- )   SIZE OFF ;
+
+\ OP,  for efficiency. OR two numbers and assemble.
+: OP,    ( N OP -- )   OR ASM8,  ;
+
+\ WF,  assemble opcode with W field set for size of register.
+: WF,   ( OP MR -- )   R16? 1 AND OP,  ;
+
+\ SIZE,  assemble opcode with W field set for size of data.
+: SIZE,  ( OP -- OP' )   SIZE @ 1 AND OP,  ;
+
+\ ,/C,  assemble either 8 or 16 bits.
+: ,/C,   ( n f -- )   IF  ASM32,  ELSE  ASM8,  THEN  ;
+
+: MOD-RM,  ( mr rmid mod -- )  -ROT RMID SWAP RLOW OR OP,  ;
+: SIB,     ( base index scale -- )  MOD-RM,  ;
+
+\ RR,  assemble register to register instruction.
+: RR,    ( MR1 MR2 -- )   300 mod-rm,  ;
+
+\ These words perform most of the addressing mode encoding.
+
+\ Assemble mod-r/m byte and s-i-b byte if necessary
+: SOP,  ( mr rmid mod -- )
+   2 pick >r                          ( mr rmid mod ) ( r: mr )
+   mod-rm,                            ( )  ( r: mr )
+
+   \ Assemble scaled index address mode if necessary
+   r> [ESP] =  ABORT" SCALED INDEX ADDRESS MODE"
+;
+
+\ MEM,  handles memory reference modes.  It takes a displacement,
+\   a mode/register, and a register, and encodes and assembles them.
+: MEM,   ( DISP MR RMID -- )
+   \ The absolute address mode is encoded in place of the
+   \ (nonexistent) "<no-displacement> [EBP]" mode.
+
+   OVER #) =  IF  5 swap 0 mod-rm, DROP  ASM32,  EXIT THEN  ( disp mr rmid )
+
+   \ Special case for "0 [EBP]" ; use short 0 displacement
+   \ instead of [EBP] (there is no [EBP] addressing mode
+   \ because that encoding is used for 32-bit displacement.)
+
+   2 PICK 0=  2 PICK [EBP] =  AND  IF           ( disp mr rmid )
+      100 MOD-RM,  ASM8,  EXIT
+   THEN                                         ( disp mr rmid )
+
+   \ Special case for "disp32 [no-base-reg] [index-reg] *scale"
+   OVER [ESP] =  ABORT" [NO-BASE-REG]"
+
+   2 PICK BIG?  IF  200 SOP, ASM32,  EXIT  THEN ( disp mr rmid ) \ disp32[reg] 
+   2 PICK 0<>   IF  100 SOP, ASM8,   EXIT  THEN ( disp mr rmid ) \ disp8[reg]
+                      0 SOP, DROP               ( )              \ [reg]
+;
+
+\ WMEM,  uses MEM, after packing the register size into the opcode
+: WMEM,   ( DISP MEM REG OP -- )   OVER WF, MEM,  ;
+
+\ R/M,  assembles either a register to register or a register to
+\  or from memory mode.
+: R/M,   ( MR REG -- )
+   OVER REG? IF  RR,  ELSE  MEM,  THEN  ;
+
+\ WR/SM,  assembles either a register mode with size field, or a
+\   memory mode with size from SIZE. Default is 16 bit. Use BYTE
+\   for 8 bit size.
+: WR/SM,   ( R/M R OP -- )   2 PICK DUP REG?
+   IF  WF, RR,  ELSE  DROP SIZE, MEM,  THEN  SIZE ON  ;
+
+\ INTER  true if inter-segment jump, call, or return.
+VARIABLE INTER
+
+\ FAR  sets INTER true.  Usage:  FAR JMP,   FAR CALL,   FAR RET.
+: FAR    ( -- )   INTER ON  ;
+
+\ ?FAR  sets far bit, clears flag.
+: ?FAR   ( n1 -- n2 )   INTER @ IF  10 OR  THEN  INTER OFF ;
+
+\ 1MI  define one byte constant instructions.
+: 1MI   CREATE  C,  DOES>  C@ ASM8,  ;
+
+\ 2MI  define ascii adjust instructions.
+: 2MI   CREATE  C,  DOES>  C@ ASM8,  12 ASM8,  ;
+
+\ XXX need to handle the 16/32 bit offset forms
+\ 3MI  define branch instructions, with one byte offset.
+: 3MI   CREATE  C,  DOES>  C@ ASM8,
+   ahere - 1-  DUP -200 177 WITHIN NOT ABORT" Branch out of Range" ASM8,
+;
+
+\ 4MI  define LDS, LEA, LES instructions.
+: 4MI   CREATE  C,
+   DOES>  C@  dup $0b2 $0b5 between  if $00f asm8, then  ASM8,  MEM,
+;
+
+\ 5MI  define string instructions.
+: 5MI   CREATE  C,  DOES>  C@ SIZE,  SIZE ON ;
+
+\ 6MI  define more string instructions.
+: 6MI   CREATE  C,  DOES>  C@ SWAP WF,  ;
+
+\ 7MI  define multiply and divide instructions.
+: 7MI   CREATE  C,  DOES>  C@ 366 WR/SM, ;
+
+\ 8MI  define input and output instructions.
+: 8MI   CREATE  C,  DOES>  C@ SWAP R16? 1 AND OR  SWAP # =
+   IF  ASM8, ASM8,  ELSE  10 OR  ASM8,  THEN  ;
+
+\ 9MI  define increment/decrement instructions.
+: 9MI   CREATE  C,  DOES>  C@  OVER R16?
+   IF  100 OR SWAP RLOW OP,  ELSE  376 WR/SM,  THEN  ;
+
+\ ??? We should support the immediate shifts
+
+\ 10MI  define shift/rotate instructions.
+\ *NOTE*  To allow both 'ax shl' and 'ax cl shl', if the register
+\ on top of the stack is cl, shift second register by cl. If not,
+\ shift top ( only) register by one.
+: 10MI  CREATE  C,  DOES>  C@ OVER CL =
+   IF  NIP 322  ELSE  320  THEN  WR/SM,  ;
+
+\ 11MI  define calls and jumps.
+\  notice that the first byte stored is E9 for jmp and E8 for call
+\  so C@ 1 AND  is zero for call, 1 for jmp.
+\  syntax for direct intersegment:   address segment #) FAR JMP
+: 11MI
+   CREATE  C, C,   DOES>                        ( [ dst ] mode apf )
+   OVER #) =  IF                                ( dst mode apf )
+      NIP C@ INTER @  IF                        ( offset segment code )
+         1 AND  IF  352  ELSE  232  THEN  ASM8, ( offset segment )
+         SWAP ASM32, ASM16,  INTER OFF          ( )
+      ELSE                                      ( dst code )
+         SWAP ahere -  SWAP                      ( rel-dst code )
+         2DUP 1 AND SWAP BIG? NOT AND  IF       ( rel-dst )
+            2 OP,  2 -  ASM8,                   ( )
+         ELSE                                   ( rel-dst )
+            ASM8,  5 -  ASM32,                  ( )
+         THEN
+      THEN
+   ELSE                                         ( mode apf )
+      OVER S#) = IF  NIP #) SWAP  THEN          ( mode' apf )
+      377 ASM8, 1+ C@ ?FAR  R/M,
+   THEN
+;
+\ 12MI  define pushes and pops.
+: 12MI  ( dst mr -- )
+   CREATE  C, C, C, C, C, DOES>       ( dst apf )
+   OVER REG?  IF                      ( dst apf )   \ General register
+      C@ SWAP RLOW OP,                ( )
+   ELSE                               ( dst apf )
+      1+ OVER SEG?  IF                ( dst apf' )  \ Segment register
+         OVER FS >=  IF               ( dst apf' )  \ FS or GS
+            $00F ASM8,  3 + C@        ( dst opcode )
+            SWAP GS = IF  10 OR  THEN ( opcode' )
+            ASM8,                     ( )
+         ELSE                         ( dst apf' )  \ CS, DS, ES, or SS
+            C@ RLOW SWAP RMID OP,     ( )
+         THEN
+      ELSE                            ( dst apf' )
+         OVER # =  IF                 ( dst apf' )  \ Immediate
+            2+ C@                     ( val # opcode )
+            SIZE @  0= IF  2 OR  THEN ( val # opcode' )
+            ASM8,  DROP ASM32,        ( )
+         ELSE                         ( dst apf' )  \ Memory
+            DUP 1+ C@ ASM8,  C@ MEM,  ( )
+         THEN
+     THEN
+   THEN
+;
+
+\ 14MI  defines returns.    RET    FAR RET    n +RET   n FAR +RET
+: 14MI  ( -- )
+   CREATE  C,  DOES>
+   \ This is definitely supposed to be asm16, not asm32
+   C@ DUP ?FAR ASM8,  1 AND 0=  IF  ASM16,  THEN
+;
+\ 13MI  define arithmetic and logical instructions.
+: 13MI  ( src dst -- )
+   CREATE  C,  DOES>                         ( src dst apf )
+   C@ >R                                     ( src dst )  ( r: op )
+   DUP REG?  IF                              ( src dst ) \ Dst is register
+      OVER REG?  IF                          ( src dst )
+         R> OVER WF, SWAP RR,                ( )         \ Register -> register
+      ELSE                                   ( src dst )
+         OVER DUP MEM? SWAP #) = OR  IF      ( src dst )
+            R> 2 OR WMEM,                    ( src dst ) \ Memory -> register
+         ELSE                                ( )
+            NIP  DUP RLOW 0=   IF            ( immed dst )
+               R> 4 OR OVER WF, R16? ,/C,    ( )         \ imm -> accumulator
+            ELSE                             ( immed dst )  \ imm -> register
+               OVER BIG? OVER R16? 2DUP AND  ( immed dst big? r16? wbit )
+               -ROT 1 AND SWAP NOT 2 AND OR  ( immed dst flag 0|1|3 )
+               200 OP,                       ( immed dst flag  )
+               SWAP RLOW 300 OR R> OP,  ,/C, ( )
+            THEN
+         THEN
+      THEN
+   ELSE                                      ( src disp dst )  \ Dst is memory
+      ROT DUP REG?  IF                       ( src disp dst )  \ reg -> mem
+         R> WMEM,                            ( )
+      ELSE                                   ( disp src disp dst ) \ imm -> mem
+         DROP                                ( disp src disp )
+         2 PICK BIG? DUP NOT 2 AND 200 OR
+         SIZE, -ROT R> MEM,
+         SIZE @ AND ,/C,  SIZE ON
+      THEN
+   THEN
+;
+
+\ Used for LGDT, SGDT, LIDT, SIDT, LLDT, SLDT,
+: 15mi  \ name ( reg-field second-byte -- )
+   create c, 3 LSHIFT c,
+   does>  $0f asm8,  dup c@ dup >r asm8,       ( adr ) ( r: mode )
+   1+ c@  r> [ also forth ] if  mem,  else  r/m,  then  [ previous ]
+;
+0 1 15mi sgdt   1 1 15mi sidt   0 0 15mi sldt  1 0 15mi str
+2 1 15mi lgdt   3 1 15mi lidt   2 0 15mi lldt  3 0 15mi ltr
+
+\ LSS, LFS, LGS 
+: 16MI  CREATE  C,  DOES>  C@  $00F ASM8,  ASM8,  MEM,  ;
+
+\ TEST  bits in dest
+: TEST   ( source dest -- )
+   DUP REG?  IF
+      OVER REG?  IF  204 OVER WF, SWAP RR,  EXIT THEN
+
+      OVER DUP MEM? SWAP #) = OR  IF   204 WMEM,  EXIT THEN
+
+      NIP  DUP RLOW 0=  IF   250 OVER WF,  R16? ,/C,  EXIT THEN  \ imm -> acc
+
+      366 OVER WF,  DUP RLOW 300 OP,
+
+   ELSE                                               \ *   -> mem
+      ROT DUP REG?  IF  204 WMEM,  EXIT THEN          \ reg -> mem
+
+      DROP  366 SIZE,  0 MEM,  SIZE @ ,/C,  SIZE ON   \ imm -> mem
+   THEN
+;
+
+\ -----
+
+HEX
+: ESC   ( source ext-opcode -- )   RLOW 0D8 OP, R/M,  ;
+
+: SETIF  ( dest condition -- )  0F ASM8,  024 XOR ASM8,  R/M,  ;
+
+\ INT  assemble interrupt instruction.
+: INT   ( N -- )   0CD ASM8,  ASM8,  ;
+
+\ XCHG  assemble register swap instruction.
+: XCHG   ( MR1 MR2 -- )
+   DUP REG?  IF
+      DUP EAX =  IF
+         DROP RLOW 90 OP,
+      ELSE
+         OVER EAX =  IF
+            NIP  RLOW 90 OP,
+         ELSE
+            86 WR/SM,
+         THEN
+      THEN
+   ELSE
+      ROT 86 WR/SM,
+   THEN
+;
+
+\ Encoding of special register moves:
+\ 0F c,
+\ 0x22 for normal->special direction, 0x20 for special->normal direction
+\ or with  0 for CRx, 1 for DRx, 4 for TRx
+: special-mov  ( s d -- )
+   $00f asm8,
+   [ also forth ]
+   dup spec?  if  $022  else  swap   $020  then   ( norm-reg spec-reg opcode )
+   over &07000 and
+      DUP &05000 = if  0  else
+      DUP &06000 = if  1  else
+      DUP &07000 = if  4  else drop then then then
+                           ( norm-reg spec-reg opcode modifier )
+   [ previous ]
+   op,                     ( norm-reg spec-reg )
+   rr,
+;
+
+\ MOV  as usual, the move instruction is the most complicated.
+\  It allows more addressing modes than any other, each of which
+\  assembles something more or less unique.
+
+: (MOV)   ( S D -- )
+   \ Stack diagram at the decision level is ( src dst )
+   DUP SEG?  IF  8E ASM8, R/M,  EXIT   THEN         ( s d )
+
+   dup spec?  if  special-mov  exit  then
+   DUP REG?  IF                                     ( s d )  \ *   -> reg
+      over spec?  if  special-mov  exit  then
+      OVER #) = OVER RLOW 0= AND  IF                ( s d )  \ abs -> acc
+         A0 SWAP WF,   DROP ASM32,  EXIT            ( s d )
+      THEN
+
+      OVER SEG?  IF  SWAP 8C ASM8, RR,  EXIT  THEN  ( s d )  \ seg -> reg
+
+      OVER # =  IF                                  ( s d )  \ imm -> reg
+         NIP DUP R16? SWAP RLOW
+         OVER 8 AND OR B0 OP, ,/C,
+         EXIT
+      THEN
+
+      8A OVER WF, R/M,                              ( )      \ r/m -> reg
+
+   ELSE                                             ( s d d ) \ *   -> mem
+      ROT DUP SEG?  IF  8C ASM8, MEM,  EXIT THEN    ( s d d ) \ seg -> mem
+
+      DUP # =  IF                                   ( s d d ) \ imm -> mem
+         DROP C6 SIZE, 0 MEM,  SIZE @ ,/C,  EXIT
+      THEN
+
+      OVER #) = OVER RLOW 0= AND   IF               ( s d d ) \ abs -> acc
+         A2 SWAP WF,  DROP   ASM32,  EXIT
+      THEN
+
+      88 OVER WF, R/M,                              ( )       \ reg -> mem
+   THEN
+;
+: MOV  (MOV)  SIZE ON  ;
+
+\ Most instructions are defined here. Mnemonics in
+\ parentheses are defined earlier or not at all.
+
+HEX
+\ CS: DS: ES: SS: assemble segment over-ride instructions.
+2E 1MI CS:
+36 1MI SS:
+3E 1MI DS:
+26 1MI ES:
+64 1MI FS:
+65 1MI GS:
+66 1MI OP:  \ XXX Need to set a mode to cause the immediate sizes to change
+67 1MI AD:  \ XXX Need to set a mode to cause the offset sizes to change
+
+ 37  1MI AAA     D5  2MI AAD     D4  2MI AAM     3F  1MI AAS
+ 10 13MI ADC     00 13MI ADD     20 13MI AND  10 E8 11MI CALL
+ 98  1MI CBW     F8  1MI CLC     FC  1MI CLD     FA  1MI CLI
+ F5  1MI CMC     38 13MI CMP     A6  5MI CMPS    99  1MI CWD
+ 27  1MI DAA     2F  1MI DAS     08  9MI DEC     30  7MI DIV
+       ( ESC )   F4  1MI HLT     38  7MI IDIV    28  7MI IMUL
+ E4  8MI IN      00  9MI INC           ( INT )  0CE  1MI INTO
+0CF  1MI IRET    77  3MI JA      73  3MI JAE     72  3MI JB
+EB  3MI JU                       73  3MI JNC     72  3MI JC
+
+ 76  3MI JBE     E3  3MI JCXZ    74  3MI JE      7F  3MI JG
+ 7D  3MI JGE     7C  3MI JL      7E  3MI JLE  20 E9 11MI JMP
+ 75  3MI JNE     71  3MI JNO     79  3MI JNS     70  3MI JO
+ 7A  3MI JPE     7B  3MI JPO     78  3MI JS      75  3MI JNZ
+ 74  3MI JZ
+
+
+ 9F  1MI LAHF
+ C5  4MI LDS     8D  4MI LEA     C4  4MI LES     B4 16MI LFS
+ B5 16MI LGS     F0  1MI LOCK   0AC  6MI LODS    E2  3MI LOOP
+ E1  3MI LOOPE   E0  3MI LOOPNE  B2 16MI LSS 
+
+       ( MOV )   0A4  5MI MOVS    20  7MI MUL     18  7MI NEG
+ 90  1MI NOP      10  7MI NOT     08 13MI OR      E6  8MI OUT
+    A1  58  8F 07 58 12MI POP     60  1MI PUSHA   9D  1MI POPF
+    A0  68 0FF 36 50 12MI PUSH    61  1MI POPA    9C  1MI PUSHF
+ 10 10MI RCL      18 10MI RCR
+ F2  1MI REP      F2  1MI REPNZ   F3  1MI REPZ
+                  F2  1MI REPNE   F3  1MI REPE
+
+ C3 14MI RET      00 10MI ROL      8 10MI ROR     9E  1MI SAHF
+ 38 10MI SAR      18 13MI SBB    0AE  5MI SCAS          ( SEG )
+ 20 10MI SHL      28 10MI SHR     F9  1MI STC     FD  1MI STD
+ FB  1MI STI     0AA  6MI STOS    28 13MI SUB           ( TEST )
+ 9B  1MI WAIT           ( XCHG )  D7  1MI XLAT    30 13MI XOR
+ C2 14MI +RET
+
+DECIMAL
+
+: LODSW      LODS ;
+: movsb byte movs ;
+: lodsb byte lods ;
+: stosb byte stos ;
+: movb  byte mov ;
+
+\ ----- READY  Macros
+
+: READY   \ initializes local labels and switches.
+   FWDS 2 CELLS + DUP FWDS !  MXL# 2 * CELLS + FWDS CELL+ !
+   BWDS MXL# CELLS ERASE
+   ASSEMBLER ;
+
+: !MACLEN
+   HERE  LAST 2 CELLS + @ -  $80 [ FORTH ] OR  LAST CELL+ @ C! ;
+
+: END-CODE
+   BP SP XCHG  !MACLEN   RET
+   PREVIOUS  PREVIOUS ALSO ;
+
+ONLY FORTH ALSO DEFINITIONS
+
+: CODE
+   HEADER
+   ASSEMBLER ALSO [ ASSEMBLER ] READY
+   BP SP XCHG ;
+
+: LABEL
+   CREATE
+   ASSEMBLER ALSO [ ASSEMBLER ] READY ;
+
+: NO-EXPAND
+   $80 LAST CELL+ @ C! ;
+
+ONLY FORTH ALSO DEFINITIONS
+
+

@@ -1,0 +1,942 @@
+\ ----- MY TINY FORTH EDITOR
+\
+\ the edit memory model looks like:
+\
+\    |buf------|top---|line-------end|--------ebuf|
+\
+
+ONLY FORTH ALSO DEFINITIONS
+VOCABULARY EDITOR
+EDITOR ALSO  DEFINITIONS
+
+\ ----- Self-fetching variables
+\
+\ These variables are used by the EDITOR intensly.  Do -not- change
+\ any one's value lightly.  The "TO" concept is used because:
+\   1) it means that the normal operation "@" is -much- quicker and
+\   2) the code becomes cleaner (but only in some applications!)
+\
+
+VALUE X                   \ the x and
+VALUE Y                   \ y location of the cursor in the file
+
+VALUE ABOVE               \ the line number of the screen top
+
+VALUE TOP                 \ the address of the top display line
+VALUE LINE                \ the address of the current line
+
+VALUE LINE-OPENED?        \ a flag indicating that the current line is opened
+
+VALUE BUF                 \ the start of the edit buffer.
+VALUE END                 \ the address 1 after the last byte of edit text
+VALUE EBUF                \ the end of the edit buffer
+
+VALUE INSERTING           \ a flag indicating the insert mode, nonzero is insert
+
+VALUE DIRTY               \ indicates that the buffer needs to be redisplayed
+VALUE FINIS               \ indicates that editing is done
+
+VALUE MESSAGE             \ address of a message for the status window
+VALUE MESSAGE2            \ address of the secondary message
+VALUE UPD-STATUS          \ true if full status update necessary
+
+VALUE LTOP
+
+$1FFF0 CONSTANT C/E       \ the number of characters in the edit buffer
+                          \ tied to the allocation in the S4.4 image
+
+    80 CONSTANT C/L       \ number of characters per line
+    16 CONSTANT L/SCR     \ number of lines visible at one time
+
+VALUE FNAME               \ index into the filename and position arrays
+
+\ these definitions reference dataspace allocated in the kernel.  do not
+\ change them lightly...
+
+: FILENAME ( -- addr )   FNAME 15 AND  64 CHARS *  FILENAMES + ;
+: POSITION ( -- addr )   FNAME 15 AND   5 CELLS *  POSITIONS + ;
+
+\ ----- common VALUE settings
+
+\ set finish flag
+: FINISHED   1 TO FINIS  ;
+
+\ set dirty flag
+: IS-DIRTY   1 TO DIRTY ;
+
+\ set update status flag
+: UPDATE-STATUS   1 TO UPD-STATUS ;
+
+\ toggle the insert mode
+: +-IMODE   INSERTING 0= TO INSERTING  UPDATE-STATUS ;
+
+\ set the address of the current line
+: >LINE ( addr -- )   TO LINE ;
+
+\ set the address of a message to display
+: >MESSAGE ( addr -- )   TO MESSAGE ;
+
+\ ----- memory interface
+\
+\ The EDITOR uses a 128k array of chars, allocated out of the hi FORTH
+\ memory pool.
+
+\ return amount of available edit memory
+: AVAIL ( -- n )
+   EBUF END -  256 - ;
+
+\ see if we have enough memory left
+: ?ENOUGH ( n -- )
+   AVAIL > IF  S"  Out of memory" ERR THEN ;
+
+\ ----- file interface
+\
+\ The EDITOR's file interface is very simple -- it depends on the
+\ user to do most of the thinking for it (how quaint! how forth-like!).
+\ The name to edit is read by INPUT-NAME and kept in the string
+\ at FILENAME.  When reading the file, INPUT-FILE will detect files that
+\ are too large and complain.  Otherwise, the entire file is read into
+\ memory and closed.  Writing the file is accomplished via the FLUSH
+\ command at the interpreter
+
+\ parse a filename from the input stream
+: INPUT-NAME
+   BL WORD DUP C@ 0= ABORT" no name"
+   DUP FEXT.4 COUNT FILENAME PLACE ;
+
+\ setup for editing a new file
+: NEW-FILE
+   13 BUF C!  10 BUF 1+ C!   BUF 2+ TO END
+   C" New file " >MESSAGE  FILENAME TO MESSAGE2 ;
+
+\ given the address of a filename as a counted string, input the
+\ file for editing if it exists
+: INPUT-FILE ( addr -- )
+   COUNT R/O OPEN-FILE
+   0= IF ( file exists)
+      ( handle) >R
+      BUF C/E R@ READ-FILE DROP ( #read)
+      DUP C/E = IF  C" File too large" >MESSAGE  THEN
+      BUF + TO END
+      R> CLOSE-FILE DROP
+      EXIT
+   THEN
+   ( else) DROP NEW-FILE ;
+
+\ given the address of a filename as a counted string, output the
+\ file in the edit buffer
+: OUTPUT-FILE ( addr -- )
+   DUP TO MESSAGE2
+   COUNT R/W CREATE-FILE
+   0= IF ( created ok)
+      ( handle) >R
+      BUF END OVER -  R@ WRITE-FILE ( #) DROP
+      R> CLOSE-FILE DROP
+      C"  Wrote "
+   ELSE
+      DROP C"  Couldn't create "
+   THEN  >MESSAGE ;
+
+
+\ ----- lines
+\
+\ this EDITOR works on text maintained as packed text.  lines are
+\ ended by a <cr><lf> pair, and the first character of the next line
+\ follows this immediately.  the VALUE END is the address just after
+\ the last byte of the last line; BUF is the address of the first byte
+\ of the first line.  all line operators that advance thru memory will
+\ terminate at END and all that go backward will terminate at BUF.
+
+\ the length is the text starting at addr, thru and including crlf
+\ : LENGTH ( addr -- # )
+\    DUP BEGIN ( f a)
+\       DUP END <> WHILE
+\       COUNT 10 =
+\    UNTIL THEN
+\    SWAP - ;
+
+\ the length is the text starting at addr, thru and including crlf
+CODE LENGTH ( addr -- # )
+        10 # AL MOV             \ delimiter
+        BX DI MOV               \ offset
+        DS PUSH                 \ segment
+        ES POP                  \
+        ' END >BODY #) CX MOV   \ get limit
+1 L:    DI CX CMP               \ are we at limit
+        2 L# JE                 \ if equal, we are
+        BYTE SCAS               \ check character
+        1 L# JNE                \ continue until equal
+2 L:    DI BX SUB               \ subtract
+        BX NEG                  \ and negate
+        END-CODE
+        NO-EXPAND
+
+\ return the address of the last char in the line, just before crlf
+\ : EOL ( addr -- addr )
+\    BEGIN ( a)
+\       DUP END <> WHILE
+\       COUNT 10 =
+\    UNTIL
+\    2-  THEN ;
+
+\ return the address of the last char in the line, just before crlf
+CODE EOL ( addr -- addr' )
+        10 # AL MOV             \ delimiter
+        BX DI MOV               \ offset
+        DS PUSH                 \ segment
+        ES POP                  \
+        ' END >BODY #) CX MOV   \ get limit
+1 L:    DI CX CMP               \ are we at limit
+        3 L# JE                 \ if equal, we are
+        BYTE SCAS               \ check character
+        1 L# JNE                \ continue until equal
+2 L:    2 # DI SUB              \ backup over crlf if not at end
+3 L:    DI BX MOV               \ return offset
+        END-CODE
+        NO-EXPAND
+
+\ ----- next/prev line
+
+\ return the address of the next line
+\ : NEXT-LINE ( a -- a )
+\    BEGIN
+\       DUP END <> WHILE
+\          COUNT 10 =
+\     UNTIL THEN ;
+
+\ return the address of the next line
+CODE NEXT-LINE ( addr -- addr' )
+        10 # AL MOV             \ delimiter
+        BX DI MOV               \ offset
+        DS PUSH                 \ segment
+        ES POP                  \
+        ' END >BODY #) CX MOV   \ get limit
+1 L:    DI CX CMP               \ are we at limit
+        3 L# JE                 \ if equal, we are
+        BYTE SCAS               \ check character
+        1 L# JNE                \ continue until equal
+3 L:    DI BX MOV               \ return offset
+        END-CODE
+        NO-EXPAND
+
+\ return the address of the previous line
+\ : PREV-LINE ( a -- a )
+\    DUP BUF <> IF
+\       2- BEGIN
+\          DUP BUF <> WHILE
+\          DUP 1- SWAP C@ 10 =
+\       UNTIL
+\          2+
+\       THEN
+\    THEN ;
+
+\ return the address of the previous line
+CODE PREV-LINE ( addr -- addr' )
+        ' BUF >BODY #) CX MOV   \ get limit
+        BX CX CMP               \ are we at limit
+        5 L# JE                 \ NO, EXIT NOW
+        STD                     \ direction = backup
+        BX DEC BX DEC           \ bx-2 for scas inst
+        10 # AL MOV             \ delimiter
+        BX DI MOV               \ offset
+        DS PUSH                 \ segment
+        ES POP                  \
+1 L:    DI CX CMP               \ are we at limit
+        3 L# JE                 \ if equal, we are
+        BYTE SCAS               \ check character
+        1 L# JNE                \ continue until equal
+2 L:    2 # DI ADD              \ move forward over crlf
+3 L:    DI BX MOV               \ return offset
+        CLD                     \ direction = forward
+5 L:    END-CODE
+        NO-EXPAND
+
+
+\ ----- make/close holes in the edit buffer
+\
+\ to insert text into or delete text out of the edit buffer, use
+\ these routines.  they track the end of edit pointer
+\ properly.  they need to do limit checking.
+
+\ open a hole in the edit buffer.  fill it with blanks
+\ from (addr) to (addr+#) move (end-addr) bytes,
+\ at (addr), fill with (end-addr) blanks
+: MAKE-HOLE ( addr # -- )
+   DUP ?ENOUGH
+   2DUP >R >R           \ f #           \R # f
+   OVER +               \ f t           \R # f
+   END R@ -             \ f t c         \R # f
+   CMOVE>               \               \R # f
+   R> R> DUP +TO END    \ f #
+   BLANK ;
+
+\ close a hole in the edit buffer.
+\ from (addr+#) to (addr) move (end-addr+#) bytes
+: CLOSE-HOLE ( addr # -- )
+   DUP>R                \ a #           \R #
+   OVER >R              \ a #           \R # a
+   +  DUP               \ f f           \R # a
+   R>                   \ f f t         \R #
+   END ROT -            \ f t #         \R #
+   CMOVE                \               \R #
+   R> NEGATE +TO END ;
+
+\ ----- the line being edited
+\
+\ the proceedure for normal typing is to 1) open the line that
+\ the cursor is on by extending it to C/L bytes (not including
+\ crlf) and fill it with blanks.  this means that the user -always-
+\ has a virtual line to type into, no matter where the "eol" really
+\ is.  it also means that in normal typing, the entire buffer is only
+\ adjusted once in a while instead of at each keystroke.  when the
+\ user keys a command that moves to a different line, the current line
+\ is closed (if it was open!) and editing proceeds.  normally a line
+\ is open only for typing.
+
+: >LINE-CLOSED ( -- )
+   0 TO LINE-OPENED? ;
+
+: OPEN-LINE
+   LINE-OPENED? ?EXIT
+   LINE EOL  C/L 2+ LINE LENGTH - MAKE-HOLE
+   1 TO LINE-OPENED? ;
+
+: CLOSE-LINE
+   LINE-OPENED? IF
+      LINE C/L  -TRAILING ( a #)
+      DUP>R  +  C/L R> - CLOSE-HOLE
+      >LINE-CLOSED
+   THEN ;
+
+\ ----- misc
+
+: ECURSOR ( -- addr )    LINE X + ;
+
+: WHITE? ( -- flag )    ECURSOR C@  BL = ;
+: EOL?   ( -- flag )    ECURSOR C@  13 = ;
+: SOL?   ( -- flag )    X 0= ;
+
+: SOF? ( -- flag )   LINE   BUF = ;
+: EOF? ( -- flag )   LINE NEXT-LINE END = ;
+
+\ sometimes, we must bind X so that it is in the physical line
+: BIND   CLOSE-LINE  LINE LENGTH 2-  X MIN  TO X ;
+
+: !CRLF ( addr -- )
+   DUP 2 MAKE-HOLE  13 OVER C!  1+  10 SWAP C! ;
+
+\ if the line is open and x is greater than the non-trailing blank
+\ length, then x is unbound. if the line is closed, and x is
+\ greater than the length (except crlf), then x is unbound.
+
+: X-UNBOUND? ( -- flag )
+   X  LINE DUP LENGTH 2-
+   LINE-OPENED? IF  -TRAILING  THEN  NIP  >= ;
+
+: #EOL ( -- n )   ECURSOR EOL  ECURSOR - 1- ;
+
+\ -----
+
+\ insert or delete one character at the cursor.  use only if line
+\ is already opened!
+
+: +CHAR   ECURSOR  DUP 1+        #EOL CMOVE>  BL  ECURSOR        C! ;
+: -CHAR   ECURSOR  DUP 1+  SWAP  #EOL CMOVE   BL  ECURSOR EOL 1- C! ;
+
+\ ----- moving the visible screen up and down
+\
+\ the top of screen is adjusted with these words, one line at a time.
+\ TOP may not be above BUF nor below END.  ABOVE is the number of lines
+\ above the top of screen, these
+\ also set the redisplay variable to indicate scrolling in the proper
+\ direction.
+
+\ top = top - 1
+: TOP-1
+   TOP BUF = ?EXIT
+   TOP PREV-LINE TO TOP  -1 +TO ABOVE  IS-DIRTY ;
+
+\ top = top + 1
+: TOP+1
+   TOP END = ?EXIT
+   TOP NEXT-LINE TO TOP   1 +TO ABOVE  IS-DIRTY ;
+
+\ ----- cursor up and down
+\
+\ the cursor may move up and down at will, so long as the current
+\ line is between BUF and END.  check at both ends of the screen to
+\ see if the visible screen needs to be adjusted
+
+: C-UP
+   SOF? ?EXIT   CLOSE-LINE
+   LINE PREV-LINE >LINE -1 +TO Y
+   Y ABOVE < IF TOP-1 THEN ;
+
+: C-DOWN
+   EOF? ?EXIT   CLOSE-LINE
+   LINE NEXT-LINE >LINE  1 +TO Y
+   Y  ABOVE L/SCR + >= IF  TOP+1  THEN ;
+
+\ ----- up and down by pages
+
+: C-UP-PAGE
+   L/SCR  0 DO  C-UP   LOOP IS-DIRTY ;
+
+: C-DOWN-PAGE
+   L/SCR  0 DO C-DOWN  LOOP IS-DIRTY ;
+
+\ ----- cursor right and left
+
+: C-RIGHT
+   X 1+  C/L 1- MIN TO X ;
+
+: C-LEFT
+   X 1-       0 MAX TO X ;
+
+\ ----- cursor home and end
+
+: C-HOME
+   0 TO X ;
+
+: C-END
+   LINE DUP LENGTH 2- -TRAILING  TO X  DROP ;
+
+\ ----- SCREEN UP AND DOWN
+
+: S-UP
+   TOP-1  Y  ABOVE L/SCR  + >= IF  C-UP    THEN ;
+
+: S-DOWN
+   TOP+1  Y  ABOVE        < IF  C-DOWN  THEN ;
+
+\ -----
+
+: IS-TOP
+   Y TO ABOVE  LINE TO TOP  0 TO X  IS-DIRTY ;
+
+: BOUNDARY? ( -- f )
+   LINE @  C" \ --" 1+ @ = ;
+
+: F-UP-PAGE
+   BEGIN   C-UP    SOF? BOUNDARY? OR  UNTIL  IS-TOP S-UP ;
+
+: F-DOWN-PAGE
+   BEGIN   C-DOWN  EOF? BOUNDARY? OR  UNTIL  IS-TOP S-UP ;
+
+: I-TEXT ( addr # -- )
+   LINE !CRLF  LINE OVER MAKE-HOLE  LINE SWAP CMOVE  IS-DIRTY ;
+
+: F-MARK-PAGE
+   CLOSE-LINE
+   S"  "        I-TEXT
+   S" \ ----- " I-TEXT
+   S" \ "       I-TEXT
+   S"  "        I-TEXT
+   C-DOWN C-END C-RIGHT IS-DIRTY ;
+
+\ -----
+
+: HOME-FILE
+   BUF >LINE  0 DUP TO X  TO Y  IS-TOP ;
+
+: END-FILE
+   TOP BEGIN
+      DUP END <> WHILE
+      NEXT-LINE  1 +TO ABOVE
+   REPEAT
+   DUP TO TOP  TO LINE  ABOVE TO Y
+   C-UP-PAGE C-DOWN-PAGE ;
+
+\ ----- INSERT/DELETE CHARS
+
+: INSERT-CHARACTER ( char -- )
+   OPEN-LINE
+   INSERTING IF  +CHAR  THEN
+   ECURSOR C!  8 TO DIRTY  C-RIGHT ;
+
+: INSERT-TAB
+   BEGIN
+      INSERTING IF    BL INSERT-CHARACTER
+                ELSE  C-RIGHT
+                THEN
+      X 7 AND  0=
+   UNTIL ;
+
+\ ----- RETURN
+
+: SPLIT-LINE
+   OPEN-LINE
+   ECURSOR !CRLF
+   ( fool open-line and colapse current line)
+   >LINE-CLOSED  OPEN-LINE CLOSE-LINE
+   LINE DUP NEXT-LINE >LINE
+   ( fool open-line and colapse next line)
+   >LINE-CLOSED  OPEN-LINE CLOSE-LINE
+   >LINE IS-DIRTY ;
+
+\ lines are joined at the end or at the cursor column, whichever is greater
+: JOIN-LINES
+   OPEN-LINE
+   X DUP>R
+      C-END X  MAX  TO X
+      ECURSOR  C/L 2+ X - CLOSE-HOLE
+      >LINE-CLOSED
+      ( WRAP-LINE)
+         LINE LENGTH 2- C/L > IF
+            LINE C/L + !CRLF
+         THEN
+   R> TO X  IS-DIRTY ;
+
+: RETURN ( removed insert mode)
+   INSERTING IF  SPLIT-LINE   THEN
+   C-HOME  C-DOWN ;
+
+\ ----- by words
+
+: >BLANK   BEGIN  EOL? ?EXIT   WHITE? NOT WHILE  C-RIGHT  REPEAT ;
+: >TEXT    BEGIN  EOL? ?EXIT   WHITE?     WHILE  C-RIGHT  REPEAT ;
+
+: W-RIGHT
+   BIND
+   EOL? IF     EOF? ?EXIT  C-DOWN C-HOME
+        ELSE   >BLANK
+        THEN
+   >TEXT ;
+
+: <TEXT    BEGIN  SOL? ?EXIT   C-LEFT  WHITE? NOT   UNTIL ;
+: <BLANK   BEGIN  SOL? ?EXIT   C-LEFT  WHITE?       UNTIL ;
+
+: W-LEFT
+   BIND <TEXT
+   SOL? IF  SOF? ?EXIT  C-UP C-END EXIT THEN
+   <BLANK >TEXT ;
+
+: W-DELETE
+   X-UNBOUND? IF JOIN-LINES EXIT  THEN
+   LINE  Y X  ECURSOR  W-RIGHT  ECURSOR
+   2DUP <> IF  OVER - CLOSE-HOLE  ELSE 2DROP  THEN
+   TO X  TO Y  >LINE  IS-DIRTY ;
+
+\ -----
+
+: DELETE-CHARACTER
+   X-UNBOUND? IF  JOIN-LINES EXIT  THEN
+   OPEN-LINE  -CHAR  8 TO DIRTY ;
+
+: C-BACKSPACE
+   X IF  C-LEFT  X-UNBOUND? ?EXIT
+   ELSE  SOF? ?EXIT  C-UP C-END    THEN
+   INSERTING IF  DELETE-CHARACTER  THEN ;
+
+\ ----- DELETE LINES
+
+: PUSH-LINE
+   LTOP LINE LENGTH + _LSTACK >=  IF
+      C" Line stack full" >MESSAGE
+      EXIT
+   THEN
+   LINE LTOP  OVER LENGTH  DUP +TO LTOP  CMOVE ;
+
+: UNDELETE-LINE
+   CLOSE-LINE
+   LTOP LSTACK 2+ = ?EXIT
+   LTOP PREV-LINE  DUP TO LTOP
+   LINE  OVER LENGTH  2DUP MAKE-HOLE  CMOVE
+   IS-DIRTY ;
+
+: DELETE-LINE
+   CLOSE-LINE
+   PUSH-LINE
+   LINE DUP LENGTH CLOSE-HOLE
+   END BUF = IF  BUF !CRLF  THEN
+   LINE END = IF C-UP THEN
+   IS-DIRTY ;
+
+\ -----
+
+CREATE _EDWIN   WVARS ALLOT   0 L/SCR 1-   $17 $1f _EDWIN  SET_WIN
+CREATE _STAT    WVARS ALLOT   L/SCR DUP    $71 $F1 _STAT   SET_WIN
+CREATE _SYSWIN  WVARS ALLOT   L/SCR 1+ 24  $07 $0f _SYSWIN SET_WIN
+
+: EDWIN   _EDWIN  WP ! ;
+: SYSWIN  _SYSWIN WP ! ;
+: STAT    _STAT   WP ! ;
+
+\ ----- DISPLAY FUNCTIONS
+
+: ZSTATUS
+   STAT
+   0 0 AT
+   Y 1+ 6 U.R
+   X 1+ 3 U.R
+   AVAIL 1024 / 3 U.R
+   INSERTING IF ."  Ins " ELSE ."  Ovr " THEN
+   BLOT
+   EDWIN ;
+
+: STATUS
+   STAT
+   MESSAGE IF
+      PAGE  MESSAGE          COUNT QTYPE
+            MESSAGE2 ?DUP IF COUNT QTYPE THEN
+      0 DUP TO MESSAGE  TO MESSAGE2
+      UPDATE-STATUS
+      EXIT
+   THEN ( else)
+   UPD-STATUS IF
+      PAGE  7 0 SET-XY [CHAR] L W_PUTC
+           14 0 SET-XY [CHAR] C W_PUTC
+           16 0 SET-XY INSERTING IF S" Ins" ELSE S" Ovr" THEN QTYPE
+           24 0 SET-XY [CHAR] K W_PUTC
+           28 0 SET-XY FILENAME COUNT QTYPE
+           68 0 SET-XY 30 W_PUTC
+           70 0 SET-XY 31 W_PUTC
+           74 0 SET-XY FNAME 0 2 QD.R
+           77 0 SET-XY $FE W_PUTC
+      0 TO UPD-STATUS
+   THEN
+    0 0 SET-XY  Y 1+ 0 6 QD.R
+   10 0 SET-XY  X 1+ 0 3 QD.R
+   21 0 SET-XY  AVAIL 1024 / 0 3 QD.R ;
+
+\ -----
+
+CREATE $EOFMSG   ," <end of file>" 13 C, 10 C,
+
+CODE XC!++ ( addr -- addr )
+        0 [BX] AL MOV                   \ char into al
+        13 # AL CMP                     \ check for cr
+        1 l# JNE                        \ skip change if not
+        32 # AL MOV                     \ make blank
+        BX DEC                          \ and move back one char
+1 L:    ' WP >BODY #) CX MOV            \ get wvar base
+        CX SI MOV                       \ into bx
+        ' ATTR_NORMAL >BODY #) SI ADD   \ point to attribute
+        0 [SI] AH MOV                   \ get the attribute
+        CX SI MOV                       \ wvar base into bx
+        ' CURSOR >BODY #) SI ADD        \ add cursor offset, giving cursor addr
+        0 [SI] DI MOV                   \ get cursor location on screen
+        FS: AL 0 [DI] MOV               \ write char
+        FS: AH 1 [DI] MOV               \ attribute
+        2 # 0 [SI] ADD                  \ increment cursor position
+        BX INC                          \ next char in string
+        END-CODE
+
+: XTYPE ( addr -- )
+   C/L 0 DO XC!++ LOOP DROP ;
+
+: .EOF
+   $EOFMSG 1+ XTYPE ;
+
+: .LINE ( addr -- )
+   DUP END = IF  DROP .EOF EXIT  THEN XTYPE ;
+
+\ ----- DISPLAY MANAGER
+
+: DISPLAY-ALL
+   HIDE_MOUSE
+   TOP  L/SCR 0 DO
+      0 I SET-XY
+      DUP .LINE  NEXT-LINE
+   LOOP DROP
+   SHOW_MOUSE ;
+
+: DISPLAY-LINE
+   HIDE_MOUSE
+   0 Y ABOVE - SET-XY  LINE .LINE
+   SHOW_MOUSE ;
+
+: DISPLAY
+   13 END C!
+   DIRTY IF
+      DIRTY 1 = IF   DISPLAY-ALL
+                ELSE DISPLAY-LINE  THEN
+      0 TO DIRTY
+   THEN ;
+
+: REFRESH
+   STATUS EDWIN  DIRTY IF  DISPLAY  THEN   X Y ABOVE - AT ;
+
+\ ----- SAVING FILES
+
+: SAVE-FILE  CLOSE-LINE FILENAME       OUTPUT-FILE ;
+
+: FLUSH      SAVE-FILE FINISHED ;
+
+\ ----- INITIALIZATION
+
+: SETUP-EDIT
+   UPDATE-STATUS
+   EDWIN
+   0 TO FINIS
+   >LINE-CLOSED
+   IS-DIRTY ;
+
+: INITIALIZE
+   EDBUF TO BUF
+   BUF TO TOP
+   BUF TO LINE
+   BUF C/E + TO EBUF
+   0 TO ABOVE
+   0 TO X
+   0 TO Y
+   1 TO INSERTING ;
+
+\ -----
+
+: LOAD_VISIBLE
+   TOP  L/SCR 0 DO ( addr)
+      DUP>R  DUP LENGTH 2- 0 MAX EVALUATE
+      R> NEXT-LINE
+   LOOP DROP ;
+
+: EXIT_LOAD
+   2 TO FINIS ;
+
+: SAVE_EXIT_LOAD
+   SAVE-FILE EXIT_LOAD ;
+
+
+\ ----- EXTENDED KEY FUNCTIONS, BASED ON SCAN CODES
+
+CREATE Q-KEYS
+        CTRL D SWITCHES C-END
+        CTRL C SWITCHES END-FILE
+        CTRL S SWITCHES C-HOME
+        CTRL R SWITCHES HOME-FILE
+               ENDSWITCH
+
+: Q-KEYMAP
+   C" ^Q (bcdfrs)" >MESSAGE  STATUS EDWIN
+   EKEY $1F AND  Q-KEYS CODESWITCH DROP ;
+
+
+\ -----
+
+CREATE FUNCTS
+   (   @q)     16 SWITCHES FINISHED
+   (   @y)     21 SWITCHES SAVE-FILE
+   (   @x)     45 SWITCHES FLUSH
+   (   f1)     59 SWITCHES EXIT_LOAD
+   (   f2)     60 SWITCHES SAVE_EXIT_LOAD
+   (   f6)     64 SWITCHES DELETE-LINE
+   ( home)     71 SWITCHES C-HOME
+   (   up)     72 SWITCHES C-UP
+   ( pgup)     73 SWITCHES C-UP-PAGE
+   (   lf)     75 SWITCHES C-LEFT
+   (   rt)     77 SWITCHES C-RIGHT
+   (  end)     79 SWITCHES C-END
+   (   dn)     80 SWITCHES C-DOWN
+   ( pgnd)     81 SWITCHES C-DOWN-PAGE
+   (  ins)     82 SWITCHES +-IMODE
+   (  del)     83 SWITCHES DELETE-CHARACTER
+   (  ^lf)    115 SWITCHES W-LEFT
+   (  ^rt)    116 SWITCHES W-RIGHT
+   ( ^end)    117 SWITCHES END-FILE
+   ( ^pdn)    118 SWITCHES F-DOWN-PAGE
+   ( ^hom)    119 SWITCHES HOME-FILE
+   ( ^pup)    132 SWITCHES F-UP-PAGE
+   ( ^ins)    146 SWITCHES F-MARK-PAGE
+   (  ^up)    141 SWITCHES S-UP
+   (  ^dn)    145 SWITCHES S-DOWN
+                  ENDSWITCH
+
+: FUNCTIONS ( char -- )
+   BFLIP $FF AND FUNCTS CODESWITCH DROP ;
+
+
+\ -----
+
+CREATE CTRLS
+           0 SWITCHES FUNCTIONS
+      CTRL A SWITCHES W-LEFT
+      CTRL C SWITCHES C-DOWN-PAGE
+      CTRL D SWITCHES C-RIGHT
+      CTRL E SWITCHES C-UP
+      CTRL F SWITCHES W-RIGHT
+      CTRL G SWITCHES DELETE-CHARACTER
+      CTRL H SWITCHES C-BACKSPACE
+      CTRL I SWITCHES INSERT-TAB
+      CTRL J SWITCHES JOIN-LINES
+      CTRL M SWITCHES RETURN
+      CTRL N SWITCHES SPLIT-LINE
+      CTRL Q SWITCHES Q-KEYMAP
+      CTRL R SWITCHES C-UP-PAGE
+      CTRL S SWITCHES C-LEFT
+      CTRL T SWITCHES W-DELETE
+      CTRL V SWITCHES +-IMODE
+      CTRL W SWITCHES S-UP
+      CTRL X SWITCHES C-DOWN
+      CTRL Y SWITCHES DELETE-LINE
+      CTRL U SWITCHES UNDELETE-LINE
+      CTRL Z SWITCHES S-DOWN
+      CTRL [ SWITCHES FINISHED
+             ENDSWITCH
+
+: CONTROLS ( n -- )
+   CTRLS CODESWITCH IF BELL THEN ;
+
+\ -----
+
+DEFER POPFILE
+DEFER NESTVIEW
+
+: MOUSE-DROPPING ( mouse-char1 -- )
+   PAD 1+ SWAP
+   BEGIN ( addr char)
+      OVER C! 1+
+      EKEY? WHILE
+      EKEY
+   REPEAT  PAD - 1- PAD C!  NESTVIEW ;
+
+: MC-DOWN   C-DOWN CLEAR-BUTTON ;
+: MC-UP     C-UP   CLEAR-BUTTON ;
+
+: MC-U/D   MOUSE@ DROP NIP
+   0  ROWS @ 2/ WITHIN IF  C-UP-PAGE    EXIT  THEN
+                           C-DOWN-PAGE  ;
+
+CREATE MICE
+   ( DOWN)  $1F SWITCHES MC-DOWN
+   ( UP  )  $1E SWITCHES MC-UP
+   ( blank) $20 SWITCHES MC-U/D
+   ( EXIT)  $FE SWITCHES POPFILE
+                ENDSWITCH
+
+: RIGHT_BUTTON
+   2 1BUT ! ( wait for release)  POPFILE ;
+
+: MOUSE-EVENT ( char -- )
+   1BUT 2 CELLS + @ 2 AND IF   DROP RIGHT_BUTTON EXIT  THEN
+   DUP>R $FF AND MICE CODESWITCH IF R> MOUSE-DROPPING ELSE R>DROP THEN ;
+
+\ ----- MAIN LOOP
+
+: ESTROKE ( char -- )
+   DUP     32 < IF CONTROLS         EXIT THEN
+   DUP    128 < IF INSERT-CHARACTER EXIT THEN
+   DUP $10000 < IF FUNCTIONS        EXIT THEN
+                   MOUSE-EVENT      ;
+
+: EDITING
+   SETUP-EDIT
+   BEGIN
+      REFRESH
+      EKEY ESTROKE
+      FINIS
+   UNTIL
+   CLOSE-LINE
+   STATUS SYSWIN ;
+
+: GOTO-LINE ( n -- )
+   0 TO Y  0 TO X
+   BUF SWAP
+   1- 0 MAX ( n) ?DUP IF
+      0 DO ( addr)
+         DUP END <> IF NEXT-LINE  1 +TO Y  THEN
+      LOOP
+   THEN
+   DUP TO TOP  >LINE  Y TO ABOVE
+   IS-DIRTY UPDATE-STATUS REFRESH ;
+
+\ -----
+
+: $LISTING ( $addr -- )
+   INITIALIZE SETUP-EDIT INPUT-FILE SYSWIN 0 0 AT ;
+
+: S-UP3   S-UP S-UP S-UP ;
+
+: VIEWING ( line# c-addr u -- )
+   FILENAME PLACE  FILENAME $LISTING  0 TO FNAME
+   GOTO-LINE S-UP3 SYSWIN PAGE ;
+
+: INIT-EDITOR
+   13 LSTACK C! 10 LSTACK 1+ C!   LSTACK 2+ TO LTOP
+   0 TO FNAME  FILENAME 64 BLANK ;
+
+
+\ -----
+
+DEFER _VIEW@
+
+: PUSHFILE
+   \ ?CHANGED
+   POSITION  X OVER !  CELL+
+             Y OVER !  CELL+
+         ABOVE OVER !  CELL+
+           TOP OVER !  CELL+
+          LINE SWAP !
+   1 +TO FNAME ;
+
+
+: _POPFILE
+   FNAME 0= IF FINISHED EXIT THEN
+   -1 +TO FNAME
+   FILENAME $LISTING
+   POSITION  DUP @ TO X      CELL+
+             DUP @ TO Y      CELL+
+             DUP @ TO ABOVE  CELL+
+             DUP @ TO TOP    CELL+
+                 @ TO LINE   CELL+
+   IS-DIRTY UPDATE-STATUS REFRESH ;
+
+\ string at pad is word to view
+: _NESTVIEW
+   PAD XFIND IF
+      FNAME 15 = IF
+         C" File nesting limit reached" >MESSAGE
+         EXIT
+      THEN
+      PUSHFILE
+      _VIEW@ FILENAME PLACE  FILENAME $LISTING
+      GOTO-LINE  S-UP3 UPDATE-STATUS
+   ELSE
+      C" can't view " >MESSAGE  PAD TO MESSAGE2
+   THEN ;
+
+' _POPFILE  IS POPFILE
+' _NESTVIEW IS NESTVIEW
+
+\ -----
+
+ONLY FORTH ALSO DEFINITIONS  EDITOR ALSO
+
+: ED
+   BEGIN
+      ['] EDITING CATCH
+      ?DUP WHILE
+      >MESSAGE
+   REPEAT
+   FINIS 2 = IF  LOAD_VISIBLE THEN ;
+
+: EDIT
+   INPUT-NAME FILENAME $LISTING ED PAGE ;
+
+: DONE   WHOLE ;
+
+: GO    LOAD_VISIBLE ;
+
+ONLY FORTH ALSO DEFINITIONS
+
+
+\ -----
+\ SIMPLE VIEW UTILTIY
+
+: VIEW@ ( xt -- line# c-addr u )
+   >VIEW @ DUP $FFFFFF AND SWAP 24 RSHIFT
+   CELLS VIEW-FILES + @ COUNT $1F AND ;
+
+EDITOR ALSO
+
+' VIEW@ IS _VIEW@
+
+: VIEWER ( caddr -- )
+   XFIND IF VIEW@ VIEWING ED ELSE DROP ." can't" THEN ;
+
+ONLY FORTH ALSO DEFINITIONS EDITOR ALSO
+
+: VIEW
+   BL WORD VIEWER ;
+
+ONLY FORTH ALSO DEFINITIONS
+

@@ -1,0 +1,68 @@
+\ new value method for s4
+\ -----
+
+: VALUE
+   0 CONSTANT ;
+
+CODE (TO)
+   BX AX MOV
+   BX POP
+   AX 0 #) MOV
+   END-CODE
+
+CODE (+TO)
+   BX AX MOV
+   BX POP
+   AX 0 #) ADD
+   END-CODE
+
+: TO
+   STATE @ IF     POSTPONE (TO)  ' >BODY HERE PATCH
+           ELSE                  ' >BODY !
+   THEN ; IMMEDIATE
+
+: +TO
+   STATE @ IF     POSTPONE (+TO)  ' >BODY HERE PATCH
+           ELSE                   ' >BODY +!
+   THEN ; IMMEDIATE
+
+: PTR
+   ' >BODY  STATE @ IF  POSTPONE LITERAL  THEN ; IMMEDIATE
+
+\ string comparison
+\ ----- 
+
+\ Compare two strings for length bytes.
+\ return  negative if (s1 < s2); 0 if (s1 = s2); positive if (s1 > s2)
+
+CODE COMP ( a1 a2 n -- -/0/+ )
+         bx cx mov         \ count in cx
+         0 # bx mov        \ flag for exit
+         si pop            \ a2 in si
+         di pop            \ a1 in di
+         repe byte cmps    \ compare the strings
+         2 L# je           \ if last chars were equal, we are done
+         3 L# jl           \ otherwise, we have a mismatch, decide which
+         bx dec            \ this is a1 < a2
+         2 L# ju           \ continue
+3 L:     bx inc            \ this is a1 > a2
+         2 L# ju           \ continue
+2 L:     end-code
+         no-expand
+
+
+
+\ \ Compare two strings for length bytes.
+\ \ return  negative if (s1 < s2); 0 if (s1 = s2); positive if (s1 > s2)
+\ : COMP ( a1 a2 # -- -/0/+ )
+\    0 DO ( a1 a2)
+\       OVER C@ UPPER
+\       OVER C@ UPPER - ?DUP IF
+\          NIP NIP ( throw addresses and loop index)
+\          0< IF  -1  ELSE  1  THEN
+\          UNLOOP EXIT
+\       THEN
+\       SWAP 1+  SWAP 1+
+\    LOOP  2DROP 0 ;
+ 
+ 

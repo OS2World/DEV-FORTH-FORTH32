@@ -1,0 +1,314 @@
+\ simple splitscreen window, who cares for more?
+
+\ each has:     origin (address)
+\               limit (address)
+\               origin (x,y) for scrolling
+\               limit (x,y) for scrolling
+\               normal attribute
+\               bright attribute
+\               cursor position (x,y)
+\               cursor pointer (offset)
+\
+\ both windows are the full screen width, which simplifies putc
+
+\ ----- simple case statement
+
+\ these are simple macros to create the case statement.  slow and bulky
+: CASEOF    " OVER = IF DROP " EVALUATE ;  IMMEDIATE
+: FOESAC    " EXIT THEN "      EVALUATE ;  IMMEDIATE
+
+\ -----
+\ primitives
+
+ONLY FORTH ALSO DEFINITIONS
+VOCABULARY VIDEO
+VIDEO ALSO DEFINITIONS
+
+code (scroll_up)   ( lines attr ulx uly lrx lry -- )
+   bl dh mov            \ row, lower right
+   bx pop               \
+   bl dl mov            \ col, lower right
+   bx pop               \
+   bl ch mov            \ row, upper left
+   bx pop               \
+   bl cl mov            \ col, upper left
+   bx pop               \
+   bl bh mov            \ attr
+   ax pop               \ lines
+   6 # ah mov           \ scroll up function
+   int10 #) call        \
+   bx pop               \
+   end-code
+   NO-EXPAND
+
+code (scroll_dn)   ( lines attr ulx uly lrx lry -- )
+   bl dh mov            \ row, lower right
+   bx pop               \
+   bl dl mov            \ col, lower right
+   bx pop               \
+   bl ch mov            \ row, upper left
+   bx pop               \
+   bl cl mov            \ col, upper left
+   bx pop               \
+   bl bh mov            \ attr
+   ax pop               \ lines
+   7 # ah mov           \ scroll up function
+   int10 #) call        \
+   bx pop               \
+   end-code
+   NO-EXPAND
+
+\ set the cursor position to the specified row and column
+CODE _at ( col row  --  )
+   AX POP
+   BL DH MOV
+   AL DL MOV
+   BX BX XOR
+   2 # AH MOV
+   INT10 #) CALL
+   BX POP
+   END-CODE
+   NO-EXPAND
+
+CODE _AT? ( -- X Y )
+        BX PUSH
+        0 # BX MOV
+        3 # AH MOV
+        INT10 #) CALL
+        BX BX XOR
+        DL BL MOV
+        BX PUSH
+        DH BL MOV
+        END-CODE
+        NO-EXPAND
+
+\ -----
+
+  160 constant b/line
+\  80 constant c/line
+\   2 constant b/char
+
+variable rows   25 rows !
+variable b/scr  25 b/line *  b/scr !
+
+variable wp
+
+: wvar
+   create , does> @ wp @ + ;
+
+      cell negate               \ initial cell address so first wvar is zero
+
+cell+ dup wvar cursor           \ address of the cursor
+cell+ dup wvar vstart           \ address of start of window
+cell+ dup wvar vlimit           \ address of end+1 of window
+cell+ dup wvar yorg             \ y and
+cell+ dup wvar xorg             \ x coordinate of tos (for scroll)
+cell+ dup wvar ylim             \ y and
+cell+ dup wvar xlim             \ x coordinate of eos (for scroll)
+cell+ dup wvar attr_normal      \ attribute for normal text
+cell+ dup wvar attr_bright      \ attribute for bright text
+
+cell+ constant wvars
+
+\ -----
+
+CODE VC!++ ( char -- )
+        BL AL MOV                       \ place char into al
+        ' WP >BODY #) CX MOV            \ get wvar base
+        CX BX MOV                       \ into bx
+        ' ATTR_NORMAL >BODY #) BX ADD   \ point to attribute
+        0 [BX] AH MOV                   \ get the attribute
+        CX BX MOV                       \ wvar base into bx
+        ' CURSOR >BODY #) BX ADD        \ add cursor offset, giving cursor addr
+        0 [BX] DI MOV                   \ get cursor location on screen
+        FS: AL 0 [DI] MOV               \ write char
+        FS: AH 1 [DI] MOV               \ attribute
+        2 # 0 [BX] ADD                  \ increment cursor position
+        BX POP                          \ new tos
+        END-CODE
+        NO-EXPAND
+
+
+\ -----
+\ for 25 line displays only (for now...)
+
+\ a 2d array for upper and lower screen
+
+CREATE SYS_SCREEN
+        0 ,     \ cursor
+        0 ,     \ vstart
+     4000 ,     \ vlimit
+        0 ,     \ yorg
+        0 ,     \ xorg
+       24 ,     \ ylim
+       79 ,     \ xlim
+        7 ,     \ attr_normal
+       15 ,     \ attr_bright
+
+: set_win ( top bot normal brite addr -- )
+   WP @ >r WP !
+   attr_bright !   attr_normal !
+   ylim !  79 xlim !  yorg !  0 xorg !
+   yorg @ b/line * vstart !
+   ylim @ 1+ b/line * vlimit !
+   vstart @ cursor !
+   R> WP ! ;
+
+\ -----
+
+: w_scrolldn
+   1 attr_normal @ yorg 2@ ylim 2@ (scroll_dn) ;
+
+: w_scrollup
+   1 attr_normal @ yorg 2@ ylim 2@ (scroll_up) ;
+
+: ?scroll
+   cursor @ vlimit @ < not if  w_scrollup  b/line cursor -! 0 out ! then ;
+
+\ slow but correct versions of these routines...
+
+\ : w_showc
+\    cursor @ b/char / c/line /mod _at  ;
+\ : w_at ( x y -- )
+\    over out !  b/line * swap b/char * + vstart @ + cursor !  w_showc ;
+\ : w_at? ( -- x y )
+\    cursor @ vstart @ - b/char / c/line /mod ;
+
+\ faster versions, but require hard constants
+
+: w_showc
+   cursor @ 2/  80 /mod _at ;
+
+\ : SET-XY ( x y -- )
+\    b/line * swap  2* + vstart @ + cursor ! ;
+
+CODE SET-XY ( x y -- )
+        B/LINE # AX MOV
+        BX MUL
+        BX POP
+        BX BX ADD
+        AX BX ADD
+        ' WP >BODY #) CX MOV            \ get wvar base
+        CX DI MOV                       \ into SI
+        ' VSTART >BODY #) DI ADD        \ point to vstart
+        0 [DI] BX ADD                   \ accumulate
+        CX DI MOV                       \ get wvar
+        ' CURSOR >BODY #) DI ADD        \ point to cursor
+        BX 0 [DI] MOV                   \ move sum into cursor
+        BX POP
+        END-CODE
+        NO-EXPAND
+
+: xy>cursor ( absx absy -- abscur )
+   160 * swap 2* + ;
+
+
+: w_at ( x y -- )
+   OVER OUT ! SET-XY W_SHOWC ;
+
+: w_at? ( -- x y )
+   cursor @ vstart @ - 2/ 80 /mod ;
+
+: abs>win ( x y -- x y )
+   yorg @ +  ylim @ min ;
+
+: win>abs ( x y -- x y )
+   yorg @ - ;
+
+: W_PAGE
+   0 attr_normal @ yorg 2@ ylim 2@ (scroll_up)  0 0 w_at ;
+
+\ -----
+\ put any character onto the screen, do not update the cursor
+
+: w_putc ( char -- )
+   VC!++  1 out +!  ?scroll ;
+
+: >sol ( offset -- offset )
+   b/line / b/line * ;
+
+: w_bell  7 _EMIT  -1 OUT +! ;  \ side effect of _EMIT
+
+: w_home  cursor @ >sol cursor !  0 out ! ;
+: w_down  b/line cursor +!  ?scroll ;
+
+: w_backspace
+   cursor @ dup >sol - if  -2 cursor +!  then ;
+
+: w_control ( ctrl -- )
+    8 caseof  w_backspace  foesac
+   13 caseof  w_home       foesac
+   10 caseof  w_down       foesac
+    7 caseof  w_bell       foesac
+            w_putc       ;
+
+: w_emit ( char -- )
+   dup 32 < if w_control else  w_putc then  w_showc ;
+
+: w_type ( addr # -- )
+   ?dup if
+      0 do  count w_putc  looP
+   THEN DROP W_SHOWC ;
+
+: w_blaze ( addr # -- )
+   attr_normal @ >r  attr_bright @ attr_normal !
+   ?dup if
+      0 do  count w_putc  loop
+   then drop w_showc
+   r> attr_normal ! ;
+
+: w_cr
+   13 w_emit 10 w_emit ;
+
+: #lag  ( -- n )
+   b/line  cursor @ b/line mod - 2/ ;
+
+: w_blot
+   cursor @ >r
+   BL  #lag 0 do  DUP VC!++  loop  DROP
+   r> cursor ! ;
+
+: w_qtype ( addr # -- )
+   ?dup if
+      0 do  count vc!++  loop
+   then drop ;
+
+\ -----
+
+: _w_show ( addr -- )
+   wvars bounds do  i @ 6 u.r  cell +loop ;
+
+CREATE XQSPACES
+   BL C, BL C, BL C, BL C,
+   BL C, BL C, BL C, BL C,
+   BL C, BL C, BL C, BL C,
+   BL C, BL C, BL C, BL C,
+
+\ Display u right-justified in field of width n.
+: QD.R ( u n)
+   >R  (d.)  R> OVER - 0 MAX XQSPACES SWAP QTYPE QTYPE ;
+
+\ -----
+
+ONLY FORTH ALSO DEFINITIONS VIDEO ALSO
+
+: WHOLE   SYS_SCREEN WP ! ;
+
+: FASTIO
+   _AT? 2>R
+   sys_screen wp !
+   ['] w_emit  'emit  !
+   ['] w_type  'type  !
+   ['] w_qtype 'qtype !
+   ['] w_blaze 'blaze !
+   ['] W_PAGE  'PAGE  !
+   ['] w_at    'at    !
+   ['] w_at?   'at?   !
+   ['] w_cr    'cr    !
+   ['] w_blot  'blot  !
+   2R> AT ;
+
+ONLY FORTH ALSO DEFINITIONS
+
+
+: AT-XY ( x y -- ) AT ;

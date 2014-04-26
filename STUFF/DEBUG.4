@@ -1,0 +1,23 @@
+\ simple debugger, prepends to colon definitions
+\ -----
+
+: debugger ( -- addr )
+   >in @ >r
+   :noname  
+      postpone .s  
+      bl word count pad place 
+      pad count postpone sliteral postpone type
+   postpone ;
+   r> >in ! ;
+
+variable dbug  0 dbug !
+   
+: debug
+   dbug @ if execute else drop then ;
+   
+: :
+   debugger >r : r> postpone literal postpone debug ; 
+
+
+: test here 100 dump ;
+: joe test test ;

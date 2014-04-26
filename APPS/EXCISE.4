@@ -1,0 +1,52 @@
+\ excise -- move words from one wordlist to another
+\ ----- 
+\ a very non-standard program
+
+\ declare all target vocabularies here, first.
+VOCABULARY DOS
+VOCABULARY FPASM
+VOCABULARY SYS
+
+MARKER CLEANUP
+
+: FIND-BEFORE ( xt hash -- linkbefore )
+   SWAP >NAME  SWAP CONTEXT @ + ( wid to search)
+   BEGIN ( na link)
+      DUP @ WHILE 
+      2DUP @ = IF NIP EXIT THEN
+      @ CELL-  
+   REPEAT TRUE ABORT" can't find word before" ;
+         
+: UNHASH ( xt -- hash*cell )
+   >NAME COUNT 31 AND HASH CELLS ;
+
+: UNLINK-XT ( xt hash -- )
+   FIND-BEFORE DUP @ CELL- @ SWAP ! ;
+
+: LINK-XT ( xt hash wid -- )
+   + ( xt link)   SWAP >NAME SWAP  2DUP @ SWAP CELL- !  ! ;
+   
+: EXCISE-XT ( xt wid -- )
+   >R DUP UNHASH  2DUP UNLINK-XT  R> LINK-XT ;
+
+\ move a word from the context vocabulary to the current vocabulary
+
+: EXCISE ( "<blanks>name" -- )
+   BL WORD  DUP C@ HUH?  FIND IF
+     CURRENT @   EXCISE-XT
+   ELSE
+      ." CAN'T FIND " COUNT TYPE
+   THEN ;
+
+DOS DEFINITIONS  ONLY FORTH ALSO
+   
+INCLUDE DOS.X
+INCLUDE FPASM.X
+\ INCLUDE SYS.X
+
+ONLY FORTH ALSO DEFINITIONS
+
+CLEANUP   
+
+
+

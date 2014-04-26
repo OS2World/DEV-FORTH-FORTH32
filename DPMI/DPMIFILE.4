@@ -1,0 +1,177 @@
+\ -----
+\ open, create, close, etc
+
+0 CONSTANT R/O   \ Read-only  access method.  FILE
+1 CONSTANT W/O   \ Write-only access method.  FILE
+2 CONSTANT R/W   \ Read/write access method.  FILE
+
+: BIN ; IMMEDIATE  \ all access is binary, do nothing
+
+\ generic call to MS-DOS, flag=0=error
+| CODE FDOS ( DX CX handle function# -- ax ior )
+        REALSEG #) AX   MOV     \ get real segment for data
+      OP: AX REGDS #)   MOV     \ set the ds appropriately
+                BX AX   MOV     \ function number
+                   BX   POP     \ read handle
+                   CX   POP     \ read cx
+                   DX   POP     \ read dx
+             INT21 #)   CALL    \ call dos(ext)
+                AX BX   MOV     \ into bx for ior
+                 1 L#   JC      \
+                BX BX   XOR
+1 L:               AX   PUSH    \ and push the return code in ax
+                        end-CODE
+                        no-expand
+
+\ Open file by name.  Return fileid.
+: OPEN-FILE ( ca u w -- fileid ior )
+   fcb=  TUCK 2>R  n>fcb  R> DUP CELL+ zcount 1+ 0 SWAP >realseg
+   0 0 0 R> $3D00 OR fdos
+   0= IF  OVER !  0  THEN ;
+
+\ Make new file by name.  Return fileid.
+: CREATE-FILE ( ca u w -- fileid ior )
+   fcb=  TUCK 2>R  n>fcb  R> DUP CELL+ zcount 1+ 0 SWAP >realseg
+   0 0 0 R> $3C00 OR fdos
+   0= IF  OVER !  0  THEN ;
+
+: DELETE-FILE ( ca u -- ior )
+   FCB= DUP>R N>FCB R> CELL+ ZCOUNT 1+ 0 SWAP >REALSEG
+   0 0 0 $4100 fdos NIP ;
+
+\ Close file by fileid.
+: CLOSE-FILE ( fileid -- ior )
+   >R  R@ @ DUP DUP $3E00 fdos  NIP  R> OFF ;
+
+: RESIZE-FILE ( ud fileid -- ior )
+   DROP 2DROP -1 ;
+   
+\ Read u chars to address ca from the given file.
+\ u2 chars are actually transferred.
+: SHORT-READ-FILE ( ca u fileid -- u2 ior )
+   @  0 -ROT $3f00      \ ca 0 uu handle command
+   fdos                 \ ca # ior
+   ?dup if  rot drop exit  then         \ if non-zero, error
+   tuck 0 -ROT realseg> 0 ;             \ zero, read from buffer, return zero
+
+\ ior is true if read was error
+: READ-FILE ( c-addr u1 fileid -- u2 ior )
+   >R 0 -ROT BEGIN                      \ total c-addr u1
+      DUP 32768 > WHILE                 \ total c-addr u1
+      OVER 32768 R@ SHORT-READ-FILE     \ total c-addr u1 u2 ior
+      IF ( error reading)               \
+         R>DROP THEN                    \
+      DUP 0= IF ( eof)                  \ total c-addr u1 u2
+         R>DROP DROP 2DROP              \ total
+         ( total) FALSE EXIT THEN       \ total false
+      DUP>R -                           \ total c-addr u3
+      ROT R@ +                          \ c-addr u3 total
+      ROT R> +                          \ u3 total c-addr
+      ROT                               \ total c-addr u3
+   REPEAT                               \ total c-addr u3
+   R> SHORT-READ-FILE                   \ total u4 ior
+   >R + R> ;                            \ u5 ior
+
+\ Write u chars from address a to the given file.
+\ u2 chars are actually transferred.
+: SHORT-WRITE-FILE ( a u fileid -- ior )
+   >r dup >r 0 SWAP >realseg 0 r> r> @ $4000 fdos nip ;
+
+: WRITE-FILE ( c-addr u fileid -- ior )
+   >R BEGIN                             \ c-addr u
+      DUP 32768 > WHILE                 \ c-addr u
+      OVER 32768 R@ SHORT-WRITE-FILE    \ c-addr u ior
+      IF ( error writing)               \ c-addr u
+         R>DROP  2DROP 0 TRUE EXIT THEN \
+      32768 /STRING                     \ c-addr u
+   REPEAT
+   R> SHORT-WRITE-FILE ;                \ ior
+
+\ -----
+
+\ dos call for rename file
+| CODE RDOS ( dx di -- ax ior )
+                bx di   mov     \ new filename at di
+                   dx   pop     \ old filename at dx
+             $56 # AH   MOV     \ FUNCTION CODE
+        REALSEG #) BX   MOV     \ get real segment for data
+      OP: BX REGES #)   MOV     \ set the es appropriately
+      OP: BX REGDS #)   MOV     \ set the ds appropriately
+             int21 #)   call    \ call dos(ext)
+                ax bx   mov     \ save ior
+                 1 L#   jc      \
+                bx bx   xor     \
+1 L:               ax   push    \ push return code in ax
+                        end-code
+                        no-expand
+
+: RENAME-FILE ( c-addr1 u1 c-addr2 u2 -- ior )
+   ( new name) FCB= DUP>R N>FCB  R> CELL+ ZCOUNT 1+    0 SWAP >REALSEG
+   ( old name) FCB= DUP>R N>FCB  R> CELL+ ZCOUNT 1+ $100 SWAP >REALSEG
+   $100 0 RDOS NIP ;
+
+\ -----
+
+| CODE SDOS ( position handle function# -- position ior )
+                BX AX   MOV     \ function to ax
+                   BX   POP     \ and read handle
+               OP: DX   POP     \ pop lo 16
+               OP: CX   POP     \ and hi 16
+             int21 #)   call    \ call bdos
+               OP: DX   PUSH    \ save hi 16
+               OP: AX   PUSH    \ and lo 16
+                AX BX   MOV     \ save ier just in case
+                 1 L#   JC
+                BX BX   XOR     \ no error
+1 L:                    END-CODE
+                        NO-EXPAND
+
+\ since the standard requires double number file positions, i
+\ will implement them, but under duress!  the valid file positions
+\ are limited to unsigned 32 bit numbers in this implementation,
+\ even if they are represented as unsigned 64 bit numbers....
+
+\ Add an offset to the given file position.
+\ n 0 = from start; n 1 = from current; n 2 = from end.
+: SEEK-FILE ( doff n fileid -- dpos ior)
+   ROT DROP  @ SWAP $4200 + sdos  0 SWAP ;
+
+\ Reposition file.
+: REPOSITION-FILE ( ud fileid -- ior) \ FILE
+   0 SWAP SEEK-FILE  -ROT 2DROP ;
+
+\ Return file position.
+: FILE-POSITION ( fileid -- ud ior) \ FILE
+   >R  0 0 1 R> SEEK-FILE ;
+
+\ Return file size.  Does not change file position.
+: FILE-SIZE ( fileid -- ud ior) \ FILE
+   >R    R@ FILE-POSITION DROP  0 0 2 R@ SEEK-FILE DROP
+   2SWAP R> REPOSITION-FILE ;
+
+\ False if file exists.
+: FILE-STATUS ( ca u -- ior ior | ? 0) \ FILE EXT
+   R/O OPEN-FILE ?DUP
+   IF  SWAP OFF   DUP  ELSE  CLOSE-FILE  0  THEN ;
+
+\ Flush buffers and write file to mass storage.
+: FLUSH-FILE ( fileid -- ior) \ FILE EXT
+   @   0 0 ROT $4500 fdos  ?DUP 0=
+   IF  DUP DUP $3E00 fdos  THEN  NIP ;
+
+\ -----
+
+: FEXT.X32 ( addr -- )
+   DUP HASDOT? IF DROP EXIT THEN   " .X32" ROT APPEND ;
+
+\ save an executable image. default extension is .x32
+
+: SAVE ( -- )
+   BL WORD DUP C@ HUH?  DUP FEXT.X32
+   HERE DP_INIT !
+   COUNT W/O CREATE-FILE ABORT" can't create" ( fileid) >R
+   $100 +ORG HERE $100 +ORG -  DUP PAD CELL+ !  R@ WRITE-FILE DROP
+   $6E766372 PAD ! ( "rcvn" as a signature)
+   PAD 2 CELLS R@ WRITE-FILE DROP
+   R> CLOSE-FILE DROP ;
+

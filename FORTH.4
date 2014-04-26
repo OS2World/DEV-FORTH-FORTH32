@@ -1,0 +1,3486 @@
+\
+\ -----
+$list
+
+\
+\ 32-bit protected-mode subroutine threaded forth, by rick vannorman
+\
+\ basic model considerations:
+\
+\ the data stack is based on BP, the return stack on SP
+\    and top of data stack is maintained in EBX
+\ CODE words begin with the sequence XCHG SP,BP (which means that
+\    inside each code word, the stack may be used freely) and end-CODE
+\    compiles the corresponding XCHG SP,BP followed by a RET instruction
+\ during compilation, any code word with a non-zero macro byte will be
+\    copied instead of called, and the XCHG SP,BP instructions will be
+\    optimized out if possible.
+\ headers are almost standard, ending at paragraph alignment:
+\       | link | # | c | c | c | ... | c | M |
+\ the macro field M is 7 bits, the msb is a marker bit
+\                       0 if normal definition (to be called)
+\                    1-7e if a macro to be copied (n is number of bytes)
+\
+\ -----
+
+        8 EQU =VOCS     \ vocabulary stack depth
+      499 EQU =THREADS  \ number of dictionary threads, should be prime
+
+=THREADS THREADS-T !    \ tell meta compiler how many threads
+    
+EXISTS #DOS [IF]      0 EQU =ORIGIN  [THEN]
+EXISTS #OS2 [IF] $28000 EQU =ORIGIN  [THEN]
+
+=ORIGIN TBASE !         \ the base address of the target image
+
+=ORIGIN $100 + EQU =PWR  \ power on reset entry
+
+      =PWR $008 + EQU =DP_INIT
+      =PWR $010 + EQU =INIT
+      =PWR $100 + EQU =KERNEL
+
+\
+\ memory map, simple version (copy at end of file also)
+\
+\ |--<psp>--|--<init>--|--<dict>--
+\ |0        |100       |200
+\
+\ |----<dict>----//----<dstk|tib>----<rstk|user>----|----<reserv>----|
+\ |                         |tib=         |up=      |res=            |
+\ |200                      | up-tib-rp   | res-#up | em-#res        |em
+\ |                      =sp|          =rp|         |                |
+\
+\
+\ -----
+\ initialization parameters
+
+\ first, change the concept of reserved memory.  os2 needs none, but dos
+\ needs at least a meg.  ALLOCATE in the dos system will pull from
+\ this region; in OS2 will take from global memory pool
+
+=INIT ORG
+
+HERE EQU 'EM    $00100000 DW    \ 1meg dictionary
+HERE EQU 'RES#  
+   EXISTS #DOS [IF] $00024000 DW [THEN]   \ 4096 bytes reserved for block buffers, etc
+                                          \ 128K bytes for edbuf, 4096 for misc editor
+   EXISTS #OS2 [IF] $00001000 DW [THEN]   \ 4096 bytes reserved for block buffers, etc
+
+HERE EQU 'UP#   $00000400 DW    \ 256 cells for user variables
+HERE EQU 'RP#   $0000C000 DW    \ 2048 cells for return stack
+HERE EQU 'TIB#  $00000100 DW    \ 256 bytes for tib
+
+
+\ -----
+\ start of kernel
+
+   =KERNEL ORG
+
+\ -----
+\ special Interpreters
+
+\ variables call this, cannot be expanded
+LABEL DOVAR ( -- a )
+               4 # BP   SUB     \ decrement sp
+            BX 0 [BP]   MOV     \ and push tos
+                   BX   POP     \ get address of data
+                        RET
+
+\ constants call this
+LABEL DOCON ( -- n )
+               4 # BP   SUB
+                   DI   POP     \ get address of data  (delay slot for BP)
+            BX 0 [BP]   MOV     \ (delay slot for DI)
+            0 [DI] BX   MOV     \ data to tos
+                        RET
+
+\ constants call this
+LABEL DO2CON ( -- n )
+               8 # BP   SUB
+                   DI   POP     \ get address of data  (delay slot for BP)
+            BX 4 [BP]   MOV     \ (delay slot for DI)
+            4 [DI] BX   MOV     \ data to tos
+            BX 0 [BP]   MOV     \ (delay slot for DI)
+            0 [DI] BX   MOV     \ data to tos
+                        RET
+
+\ -----
+\ user variables
+
+LABEL DOUSER ( -- a )
+               4 # BP   SUB     \
+                   DI   POP     \ address of user offset   (BP delay slot)
+            BX 0 [BP]   MOV     \
+                SI BX   MOV     \ get base of user memory
+            0 [DI] BX   ADD     \ index into user memory
+                        RET
+
+\ -----
+\ reserved space variables
+
+VARIABLE RS                     \ the reserved space base address, set by COLD
+
+LABEL DODS ( -- a )
+               4 # BP   SUB     \ push tos
+                   DI   POP     \ address of ds offset  (BP delay slot)
+            BX 0 [BP]   MOV     \ via bp
+             RS #) BX   MOV     \ get base of reserved space
+            0 [DI] BX   ADD     \ index into ds memory
+                        RET
+
+\ -----
+
+\ a token for compilation.
+\ forces the optimizer to behave around branches
+CODE _BEGIN             END-CODE
+
+\ unconditional branch. exists only as a macro pattern.
+CODE _AGAIN
+                 0 #)   JMP             \ branch to be filled in
+                        END-CODE
+
+\ conditional branch. exists only as a macro pattern
+CODE _IF
+                BX BX   OR              \ test tos
+                   BX   POP             \ get new tos
+                 1 L#   JNZ             \ skip long branch
+                 0 #)   JMP             \ branch to be filled in to target
+1 L:                    END-CODE
+
+\ -----
+\ do loops
+
+\ push limit and initial on the return stack, modified so that the
+\ first overflow results in loop termination. macro pattern only.
+CODE _DO ( n1 n2 -- )
+                   ax   pop     \ ax=n1, bx=n2
+               8 # bp   sub
+       $80000000 # ax   add     \ ax=ax+80000000    (bp delay slot)
+             ax  4 [bp] mov
+                ax bx   sub     \ bx = bx - ax
+             bx  0 [bp] mov
+                   bx   pop     \ new tos
+                        END-CODE
+
+\ conditional branch. exists only as a macro pattern
+CODE _?DO
+                   AX   POP             \ get ax
+                   AX   PUSH            \ replace for real _DO
+                AX BX   CMP             \ test for equal
+                 1 L#   JNE             \ if not equal, is ok to start loop
+                   BX   POP             \ discard n1
+                   BX   POP             \ and n2
+                 0 #)   JMP             \ long jump for THEN to patch
+1 L:                    END-CODE
+
+
+\ loop end; increment the index, check for overflow. macro pattern only.
+CODE _LOOP \ could be even faster if jmp didn't have to be last instruction
+             1 # 0 [bp] add     \ top of return stack + 1
+            8 [bp]  bp  lea     \ discard indices
+                 1 L#   jo      \ iterate if no overflow
+               8 # bp   sub     \ restore indices
+                 0 #)   JMP     \ jmp to top of loop
+1 L:                      END-CODE
+
+
+\ loop end; add an arbitrary integer to the index, check for overflow
+\ macro pattern only
+CODE _+LOOP \ could be even faster if jmp didn't have to be last instruction
+             BX  0 [bp] add     \ top of return stack + TOS
+                   bx   pop
+            8 [bp]  bp  lea     \ discard indices
+                 1 L#   jo      \ iterate if no overflow
+               8 # bp   sub     \ restore indices
+                 0 #)   JMP     \ jmp to top of loop
+1 L:                      END-CODE
+
+\ discard do loop indices from return stack, prepare for EXIT or LEAVE.
+\ macro only
+CODE UNLOOP ( -- )
+               8 # BP   ADD
+                        END-CODE
+                        COMPILE-ONLY
+
+\ calculate the loop index. macro only
+CODE I ( -- n )
+                   bx   push    \ push tos into nos
+            0 [bp] bx   mov     \ get rtos
+            4 [bp] bx   add     \ and add rnos to form i
+                        END-CODE
+                        COMPILE-ONLY
+
+\ calculate the outer loop index. macro only
+CODE J ( -- n )
+                   bx   push    \ push tos into nos
+            8 [bp] bx   mov     \ get rtos
+           12 [bp] bx   add     \ and add rnos
+                        END-CODE
+                        COMPILE-ONLY
+
+\ calculate the outer loop index. macro only
+CODE K ( -- n )
+                   bx   push    \ push tos into nos
+           16 [bp] bx   mov     \ get rtos
+           20 [bp] bx   add     \ and add rnos
+                        END-CODE
+                        COMPILE-ONLY
+
+\ -----
+\ execution modifiers
+
+\ compile a RETurn instruction. macro only
+XCODE EXIT              RET
+                        END-XCODE
+                        COMPILE-ONLY
+
+
+\ exit if condition is true
+CODE ?EXIT ( flag -- )
+                BX BX   OR
+                   BX   POP
+                 1 L#   JZ
+                BP SP   XCHG
+                        RET
+1 L:                    END-CODE
+
+\ jump to an address.
+XCODE EXECUTE ( addr -- )
+            BX AX   MOV
+             0 [BP] BX  MOV
+             4 #   BP   ADD
+                   AX   JMP
+                  END-XCODE
+                  NO-EXPAND
+
+\ jump through a pointer if the pointer is non-zero
+XCODE @EXECUTE ( addr -- )
+            0 [BX] AX   MOV
+             0 [BP] BX  MOV
+             4 #   BP   ADD
+                AX AX   OR
+                 1 L#   JZ
+                   AX   JMP
+1 L:                    END-XCODE
+                        NO-EXPAND
+
+\ -----
+\ has to be defined early
+VARIABLE 'THROW
+: THROW 'THROW @EXECUTE ;
+
+\ -----
+\ memory fetch and store. 32-, 16-, and 8-bit words
+
+\ x is the value stored at a-addr.
+CODE @ ( a-addr -- x )
+           00 [BX] BX   MOV
+                        END-CODE
+
+\ Store x at a-addr
+CODE ! ( x a-addr -- )
+         AX  POP
+  AX 0 [BX]  MOV
+         BX  POP
+   END-CODE
+
+\ fetch a 16 bit value from addr
+CODE H@ ( h-addr -- n )
+                AX AX   XOR
+        OP: 0 [BX] AX   MOV
+                AX BX   MOV
+                        END-CODE
+
+\ store a 16 bit value at addr
+CODE H! ( n h-addr -- )
+                   AX   POP     \ get N
+         OP: AX 0 [BX]  MOV     \ write 16 bits
+                   BX   POP
+                        END-CODE
+
+
+\ fetch an 8 bit value from addr
+CODE C@ ( c-addr -- char )
+                AX AX   XOR
+           00 [BX] AL   MOV
+                AX BX   MOV
+                        END-CODE
+
+\ store char at c-addr
+CODE C! ( char c-addr -- )
+                   AX   POP
+           AL 00 [BX]   MOV
+                   BX   POP
+                        END-CODE
+
+\ -----
+\ misc memory operations
+
+\ Add n|u to the single-cell number at a-addr.
+CODE +! ( n|u a-addr -- )
+                   AX   POP
+            AX 0 [BX]   ADD
+                   BX   POP
+                        END-CODE
+
+\ subtract n|u to the single-cell number at a-addr.
+CODE -! ( n|u a-addr -- )
+                   AX   POP
+            AX 0 [BX]   SUB
+                   BX   POP
+                        END-CODE
+
+\ add u to the byte variable at c-addr
+CODE C+! ( u c-addr -- )
+                   AX   POP
+            AL 0 [BX]   ADD
+                   BX   POP
+                        end-CODE
+
+
+\ logical-or u with the byte variable at c-addr
+CODE COR! ( u c-addr -- )
+                   AX   POP
+            AL 0 [BX]   OR
+                   BX   POP
+                        END-CODE
+
+CODE @+ ( addr -- addr+cell [addr] )
+            0 [BX] AX   MOV
+               4 # BX   ADD
+                   BX   PUSH
+                AX BX   MOV
+                        END-CODE
+
+\ -----
+\ return stack maniuplation
+
+\ the address of the return stack pointer
+CODE RP@ ( -- a-addr )
+                   BX   PUSH
+                BP BX   MOV
+                        END-CODE
+
+\ set the return stack pointer.
+CODE RP! ( a-addr -- )
+                BX BP   MOV
+                   BX   POP
+                        END-CODE
+
+\ move x from the return stack to the data stack
+CODE R> ( -- x )   ( R: x -- )
+                   BX  PUSH
+            0 [BP] BX  MOV
+              4 #  BP  ADD
+                       END-CODE
+                       COMPILE-ONLY
+
+\ copy x from the return stack to the data stack
+CODE R@ ( -- x )   ( R: x -- x )
+                   BX   PUSH
+           00 [BP] BX   MOV
+                        END-CODE
+                        COMPILE-ONLY
+
+\ move x to the return stack.
+CODE >R ( x -- ) ( R: -- x )
+              4 #  BP  SUB
+           BX  0 [BP]  MOV
+                   BX  POP
+                       END-CODE
+                       COMPILE-ONLY
+
+\ copy x from the data stack to the return stack
+CODE DUP>R ( x -- x )  ( R: -- x )
+               4 # BP   SUB
+            BX  0 [BP]  MOV
+                        END-CODE
+                        COMPILE-ONLY
+
+\ discard x from the return stack
+CODE R>DROP ( -- )  ( R: x -- )
+               4 # BP   ADD
+                        END-CODE
+                        COMPILE-ONLY
+
+\ -----
+\ double number return stack manipulation
+
+\ transfer cell pair x1 x2 to the return stack.
+\ "SWAP >R >R"
+CODE 2>R ( x1 x2 -- )  ( R: -- x1 x2 )
+     8 # BP  SUB
+  BX 0 [BP]  MOV
+         BX  POP
+  BX 4 [BP]  MOV
+         BX  POP
+         END-CODE
+         COMPILE-ONLY
+
+\ copy the cell pair from the return stack to the data stack.
+\ "R> R> 2DUP >R >R SWAP"
+CODE 2R@ ( -- x1 x2 )   ( R: x1 x2 -- x1 x2 )
+                   BX   PUSH
+            4 [BP] BX   MOV
+                   BX   PUSH
+            0 [BP] BX   MOV
+                        END-CODE
+                        COMPILE-ONLY
+
+\ transfer cell pair x1 x2 from the return stack to the data stack.
+\ "R> R> SWAP"
+CODE 2R> ( -- x1 x2 )   ( R: x1 x2 -- )
+         BX  PUSH
+  4 [BP] BX  MOV
+         BX  PUSH
+  0 [BP] BX  MOV
+     8 # BP  ADD
+         END-CODE
+         COMPILE-ONLY
+
+\ -----
+\ n is the correct number of cells to put on the return stack
+
+CODE N>R ( x1 x2 .. xn n -- )  ( R: -- x1 x2 .. xn n )
+        0 [BP] DX MOV   \ get return address
+        bx push
+        bx inc
+        bx cx  mov       \ count of cells
+        bx bx  add       \ bx * 2
+        bx bx  add       \ bx * 4 is number of bytes for indexing
+        bx bp  sub       \ new top of return stack
+        bp BX  mov       \ copy for use, leave bp for later
+1 L:  4 #  BX  ADD
+           AX  POP
+    AX  0 [BX] MOV     \ get nx into return stack
+           CX  DEC
+         1 L#  JNZ     \ and repeat
+2 L:    bx pop         \ get new tos
+        DX 0 [BP] MOV
+        end-code
+        no-expand
+        COMPILE-ONLY
+
+\ n is the correct number of cells to get from the return stack
+CODE NR> ( -- x1 x2 .. xn N )  ( R: x1 x2 .. xn N )
+        bx push         \ save tos
+        bp sp xchg      \ swap stacks
+        dx pop          \ return address
+        cx pop          \ n
+        2 L# jcxz       \ skip if zero
+        cx bx mov       \ into b
+        cx ax mov       \ another copy
+        bx bx add       \ bx * 2
+        bx bx add       \ bx * 4 is number of bytes for indexing
+        bx bp sub       \ new top of data stack
+        bp di mov       \ copy for use, leave bp for later
+1 L:    0 [DI] pop      \ get nx into return stack
+        4 # di add      \ and move to next
+        CX  DEC
+        1 L# JNZ       \ and repeat
+2 L:    dx push         \ replace return address
+        bp sp xchg      \ swap stacks
+        ax bx mov       \ return n to stack
+        end-code
+        no-expand
+        COMPILE-ONLY
+
+CODE NR@ ( N -- N )
+         BX SHL
+         BX SHL
+      BP BX ADD                         \ ADDRESS OF ITEM
+  0 [BX] BX MOV                         \ GET ITEM
+            END-CODE
+
+CODE NR! ( N N -- N )            
+         BX SHL
+         BX SHL
+      BP BX ADD                         \ ADDRESS OF ITEM
+         AX POP                         \ GET ITEM
+  AX 0 [BX] MOV                         \ WRITE ITEM
+         BX POP
+            END-CODE
+
+\ -----
+\ data stack manipulation
+
+\ the address of the data stack
+CODE SP@ ( -- a-addr )
+                   BX   PUSH
+                SP BX   MOV
+                        END-CODE
+
+\ set the data stack pointer.
+CODE SP! ( a-addr -- )
+                BX SP   MOV
+                   BX   POP
+                        END-CODE
+
+\ remove x from the data stack
+CODE DROP ( x -- )
+                   BX   POP
+                        END-CODE
+
+\ duplicate x
+CODE DUP ( x -- x x )
+                   BX   PUSH
+                        END-CODE
+
+\ exchange x1 and x2
+CODE SWAP ( x1 x2 -- x2 x1 )
+                   AX   POP
+                   BX   PUSH
+                AX BX   MOV
+                        END-CODE
+
+\ place a copy of x1 on top of the stack
+CODE OVER ( x1 x2 -- x1 x2 x1 )
+                   BX   PUSH
+                SP DI   MOV
+            4 [DI] BX   MOV
+                        END-CODE
+
+CODE UNDER+ ( n x n1 -- n+n1 x )
+                BX AX   MOV
+                   BX   POP
+                   CX   POP
+                AX CX   ADD
+                   CX   PUSH
+                        END-CODE
+
+\ rotate top three stack entries
+CODE ROT ( x1 x2 x3 -- x2 x3 x1 )
+                BX AX   MOV
+                   CX   POP
+                   BX   POP
+                   CX   PUSH
+                   AX   PUSH
+                        END-CODE
+
+\ reverse rotation top three stack entries.  "ROT ROT"
+CODE -ROT ( x1 x2 x3 -- x3 x1 x2 )
+                BX AX   MOV
+                   BX   POP
+                   CX   POP
+                   AX   PUSH
+                   CX   PUSH
+                        END-CODE
+
+\ drop the first item below the top of stack
+CODE NIP ( x1 x2 -- x2 )
+                   AX   POP
+                        END-CODE
+
+
+\ copy the first (top) stack item below the second stack item.
+CODE TUCK ( x1 x2 -- x2 x1 x2 )
+                   AX   POP
+                   BX   PUSH
+                   AX   PUSH
+                        END-CODE
+
+\ write logical true to a-addr
+CODE ON ( a-addr -- )
+          -1 # 0 [BX]   MOV
+                   BX   POP
+                        END-CODE
+
+\ write logical false to a-addr
+CODE OFF ( a-addr -- )
+           0 # 0 [BX]   MOV
+                   BX   POP
+                        END-CODE
+
+\ do nothing
+CODE NOOP
+                        NOP
+                        END-CODE
+                        
+\ -----
+\ boolean logic
+
+\ x3 is the bit-by-bit logical 'and' of x1 and x2.
+CODE AND ( x1 x2 -- x3 )
+                   AX   POP
+                AX BX   AND
+                        END-CODE
+
+\ x3 is the bit-by-bit logical 'or' of x1 and x2.
+CODE OR ( x1 x2 -- x3)
+                   AX   POP
+                AX BX   OR
+                        END-CODE
+
+\ x3 is the bit-by-bit logical 'exclusive-or' of x1 and x2.
+CODE XOR ( x1 x2 -- x3)
+                   AX   POP
+                AX BX   XOR
+                        END-CODE
+
+\ invert all bits of x1, giving x2
+CODE INVERT ( x1 -- x2 )
+                   BX   NOT
+                        END-CODE
+
+\ exchange the low 2 bytes of x1
+CODE BFLIP ( x1 -- x2 )
+                BL BH   XCHG
+                        END-CODE
+
+
+\ exchange the high and low halves of x1
+CODE FLIP ( x1 -- x2 )
+              16 # CL   MOV
+                BX CL   ROL
+                        END-CODE
+
+\ -----
+\ 32 bit arithmetic
+
+\ Add n2|u2 to n1|u1, giving the sum n3|u3.
+\ Carry and overflow ignored.
+CODE +  ( n1|u1 n2|u2 -- n3|u3 )
+                   AX   POP
+                AX BX   ADD
+                        END-CODE
+
+\ Subtract n2|u2 from n1|u1, giving the difference n3|u3.
+\ Carry and overflow ignored
+CODE - ( n1|u1 n2|u2 -- n3|u3 )
+                   AX   POP
+                BX AX   SUB
+                AX BX   MOV
+                        END-CODE
+
+\ n2 is the negation of n1
+CODE NEGATE ( n1 -- n2 )
+                   BX   NEG
+                        END-CODE
+
+\ n2 is the absolute value of n1.
+CODE ABS ( n1 -- +n2 )
+                BX BX   OR
+                 1 L#   JNS
+                   BX   NEG
+1 L:                    END-CODE
+
+\ -----
+\ comparisons
+
+\ flag is true if n is less than zero.
+CODE 0< ( n -- flag )
+   BX BX  ADD
+   BX BX  SBB
+   END-CODE
+
+\ flag is true if n is equal to zero.
+CODE 0= ( n -- flag )
+   BX     NEG
+   BX BX  SBB
+   BX     NOT
+   END-CODE
+
+
+\ flag is true if n is equal to zero.
+CODE NOT ( n -- flag )
+   BX     NEG
+   BX BX  SBB
+   BX     NOT
+   END-CODE
+
+\ flag is true if n is not equal to zero
+CODE 0<> ( n -- flag )
+   BX     NEG
+   BX BX  SBB
+   END-CODE
+
+\ flag is true if x1 is bit-for-bit the same as x2.
+CODE = ( x1 x2 -- flag )
+   AX      POP
+   BX   AX XOR     \ Resultant AX is 0 if equal
+   1 #  AX SUB     \ Borrow-out set only if AX is 0
+   BX   BX SBB     \ -1 only if AX is 0
+END-CODE
+
+\ flag is true if any bit of x1 different from x2.
+CODE <> ( x1 x2 -- flag )
+   AX      POP
+   BX   AX XOR     \ Resultant AX is 0 if equal
+   AX      NEG     \ Borrow-out set only if AX is 0
+   BX   BX SBB     \ -1 only if AX is 0
+END-CODE
+
+
+\ flag is true if u1 is less than u2
+CODE U< ( u1 u2 -- flag )
+      AX   POP
+   BX AX   SUB
+   BX BX   SBB
+   END-CODE
+
+\ flag is true if n1 is less than n2.
+CODE < ( n1 n2 -- flag )
+                   AX   POP
+                BX AX   SUB     \ cx:ax - dx:bx
+               0 # BX   MOV     \ false
+                 1 L#   JGE     \ branch if false is correct
+                   BX   DEC     \ make false true
+1 L:                    END-CODE
+
+\ flag is true if u1 is greater than u2
+CODE U> ( u1 u2 -- flag )
+      AX   POP
+   AX BX   SUB
+   BX BX   SBB
+   END-CODE
+
+\ flag is true if n1 is greater than n2.
+CODE > ( n1 n2 -- flag )
+                   AX   POP
+                BX AX   SUB
+               0 # BX   MOV
+                 1 L#   JLE
+                   BX   DEC
+1 L:                    END-CODE
+
+\ flag is true if n1 is greater than or equal to n2.
+CODE >= ( n n -- flag )
+                   AX   POP
+                BX AX   SUB
+               0 # BX   MOV
+                 1 L#   JL
+                   BX   DEC
+1 L:                    END-CODE
+
+\ flag is true if n1 is less than of equal to n2.
+CODE <= ( n1 n2 -- flag )
+                   AX   POP
+                BX AX   SUB
+               0 # BX   MOV
+                 1 L#   JG
+                   BX   DEC
+1 L:                    END-CODE
+
+\ flag is true if n1 is greater than zero.
+CODE 0> ( n1 -- flag )
+               0 # BX   CMP
+               0 # BX   MOV
+                 1 L#   JLE
+                   BX   DEC
+1 L:                    END-CODE
+
+\ ----- min and max
+
+\ n3 is the greater of n1 and n2
+CODE MAX ( n1 n2 -- n3 )
+        AX POP
+     AX BX CMP
+      1 L# JG
+     AX BX MOV
+1 L:       END-CODE
+
+\ n3 is the lesser of n1 and n2
+CODE MIN ( n1 n2 -- n3 )
+        AX POP
+     AX BX CMP
+      1 L# JL
+     AX BX MOV
+1 L:       END-CODE
+
+\ Duplicate x if it is non-zero.
+CODE ?DUP ( x -- 0 | x x )
+        BX BX OR
+         1 L# JE
+           BX PUSH
+1 L:          END-CODE
+
+
+\ flag is true if n1|u1 is less than n3|u3 and not less than n2|u2.
+\ all comparisons are performed in a circular number space.
+: WITHIN ( n1|u1 n2|u2 n3|u3 -- flag )
+   OVER - >R - R> U< ;
+
+
+\ ----- multiply
+
+\ multiply u1 by u2 giving the unsigned double-cell product ud.  all values
+\ and arithmetic are unsigned
+CODE UM* ( u1 u2 -- ud )
+        AX POP
+        BX MUL
+        AX PUSH
+        DX BX MOV
+        END-CODE
+
+\ Multiply n1|u1 by n2|u2 giving the product n3|u3.
+CODE * ( n|u1 n|u2 -- n|u3 )
+        AX POP
+        BX MUL
+        AX BX MOV
+        END-CODE
+
+\ ----- divide
+
+\ divide ud by u1, giving the quotient u3 and the remainder u2.  all values
+\ and arithmetic are unsighed.
+CODE (UM/MOD) ( ud u -- ur uq )
+\ CODE UM/MOD ( ud u -- ur uq )
+        DX POP
+        AX POP
+        DX BX CMP
+        1 L# JBE     \ avoids interrupt 0 for divisor too small & divide by 0
+        BX DIV
+        DX PUSH
+        AX BX MOV
+        \ 2 L# JU      \ in-line expansion of END-CODE would optimize further
+      BP SP   XCHG
+              RET
+1 L:    BX PUSH      \ division by zero returns zero
+2 L:    END-CODE
+        NO-EXPAND
+
+-10 CONSTANT -10
+
+: UM/MOD ( ud u -- ur uq )
+   ?DUP IF (UM/MOD) EXIT THEN
+   -10 THROW ;                     \ division by zero
+
+
+\ ----- simple constant arithmetic
+
+\ Add 1 to n1|u1 giving the sum n2|u2.
+CODE 1+ ( n1|u1 -- n2|u2 )
+        BX INC
+        END-CODE
+
+\ Add 2 to n1|u1 giving the sum n2|u2.
+CODE 2+ ( n -- n+2 )
+        2 # BX ADD
+        END-CODE
+
+\ Subtract 1 from n1|u1 giving the difference n2|u2.
+CODE 1- ( n1|u1 -- n2|u2 )
+        BX DEC
+        END-CODE
+
+\ Subtract 2 from n1|u1 giving the difference n2|u2.
+CODE 2- ( n -- n-2 )
+        2 # BX SUB
+        END-CODE
+
+\ x2 is the result of shifting x1 one bit toward the least-significant
+\ bit, leaving the most-significant bit unchanged
+CODE 2/ ( x1 -- x2 )
+        BX SAR
+        END-CODE
+
+\ d2 is the result of shifting d1 one bit toward the least-significant
+\ bit, leaving the most-significant bit unchanged
+CODE D2/ ( d1 -- d2 )
+     SP DI MOV
+        BX SAR
+    0 [DI] RCR
+        END-CODE
+
+\ x2 is the result of shifting x1 one bit toward the most-significant
+\ bit, filling the vacated least-significant bit with zero.
+CODE 2* ( x1 -- x2 )
+        BX SHL
+        END-CODE
+
+\ d2 is the result of shifting d1 one bit toward the most-significant
+\ bit, filling the vacated least-significant bit with zero.
+CODE D2* ( d1 -- d2 )
+     SP DI MOV
+    0 [DI] SHL
+        BX RCL
+        END-CODE
+
+\ u2 is the result of shifting u1 one bit toward the least-significant
+\ bit, filling the most-significant bit with zero.
+CODE U2/ ( u1 -- u2 )
+        BX SHR
+        END-CODE
+
+\ Perform a logical right shift of n bit-places on x1, giving x2.
+\ If n is
+\ positive, shift the bits n places toward the most-significant bit.
+\ If n is negative, shift them toward the least-significant bits.
+\ Put zero into the places "uncovered" by the shift.
+CODE RSHIFT ( x1 n -- x2 )
+        BX CX MOV               \ shift count into cx
+        BX POP                  \ x1 into bx
+        BX CL SHR               \ shift right
+        END-CODE               \ continue
+
+\ Perform a logical left shift of n bit-places on 1, giving x2.
+
+CODE LSHIFT ( x1 n -- x2 )
+        BX CX MOV               \ shift count into cx
+        BX POP                  \ x1 into bx
+        BX CL SHL               \ logical shift left if positive
+        END-CODE               \ continue
+
+
+\ -----
+\ portability model for memory
+
+\ The definition of CELL is used as the prototype for literals.
+
+\ n is the size of a cell specified in address units
+CODE CELL ( -- n )
+        BX PUSH
+        4 # BX MOV
+        END-CODE
+
+\ add the size of a cell, specified in address units, to a-addr1,
+\ giving a-addr2
+CODE CELL+ ( a-addr1 -- a-addr2 )
+        4 # BX ADD
+        END-CODE
+
+\ subtract the size of a cell, specified in address units, from a-addr1,
+\ giving a-addr2
+CODE CELL- ( a-addr1 -- a-addr2 )
+        4 # BX SUB
+        END-CODE
+
+\ n2 is the size, in address units, of n1 cells
+CODE CELLS ( n1 -- n2 )
+        BX SHL
+        BX SHL
+        END-CODE
+
+\ add the size of one character, specified in address units, to
+\ c-addr1, giving c-addr2
+CODE CHAR+ ( c-addr1 -- c-addr2 )
+        BX INC
+        END-CODE
+
+\ n2 is the size, in address units, of n1 characters
+CODE CHARS ( n1 -- n2 )
+        END-CODE
+
+\ ----- system constants
+
+32 CONSTANT BL      ( -- char )    \ char is the character value for a space
+ 0 CONSTANT 0       ( -- n )       \ n is a constant zero
+ 1 CONSTANT 1       ( -- n )       \ n is a constant one
+ 2 CONSTANT 2       ( -- n )       \ n is a constant two
+-1 CONSTANT -1      ( -- n )       \ n is a constant negative one
+
+ 0 CONSTANT FALSE   ( -- flag )    \ flag is false
+-1 CONSTANT TRUE    ( -- flag )    \ flag is true
+
+\ n is the number of vocabularies allowed in the search order CONTEXT
+=VOCS CONSTANT #VOCS       ( -- n )
+
+\ n is the number of threads in a wordlist
+=THREADS CONSTANT #THREADS    ( -- n )
+
+\ c-addr is the address of a character string, and u is the string's
+\ character count.  this function will always return false.
+: ENVIRONMENT? ( c-addr u -- false )
+   DROP DROP FALSE ;        \ always false
+
+
+\ -----
+\ strings
+
+\ return the character string specification for the counted string
+\ stored at c-addr1. c-addr2 is the address of the first character
+\ after c-addr1. u is the contents of the character at c-addr1, which
+\ is the length in characters of the string at c-addr1
+CODE COUNT ( b -- b+1 n )
+        0 [BX] AL MOV           \ count into al
+               BX INC           \ b+1
+               BX PUSH          \ SAVE
+            BX BX XOR           \ big zero
+            AL BL MOV           \ count to tos
+                  END-CODE
+
+\ if u is greater than zero, copy the contents of u consectutive
+\ address units at addr1 to the u consecutive address units at
+\ addr2. the first byte to be moved will be from addr1 to addr2.
+\ this may cause an overlap in memory.
+XCODE CMOVE ( addr1 addr2 u -- )
+                   SI   PUSH    \ save up
+                BP SP   XCHG
+                BX CX   MOV     \ count
+                   DI   POP     \ get dest offset
+                   SI   POP     \ get source offset
+                   DS   PUSH
+                   ES   POP
+                        REPNE
+                        MOVSB
+                   BX   POP
+                AX SI   MOV     \ restore UP
+                BP SP   XCHG
+                   SI   POP
+                        END-XCODE
+                        NO-EXPAND
+
+\ if u is greater than zero, copy the contents of u consectutive
+\ address units at addr1 to the u consecutive address units at
+\ addr2. the first byte to be moved will be from (addr1+u-1)
+\ to (addr2+u-1). this may cause an overlap in memory.
+XCODE CMOVE> ( addr1 addr2 u -- )
+                   SI   PUSH    \ save up
+                BP SP   XCHG
+                BX CX   MOV
+                   CX   DEC     \ count-1
+                   DI   POP     \ destination
+                   SI   POP     \ source
+                CX DI   ADD     \ tail of dest
+                CX SI   ADD     \ tail of source
+                   CX   INC     \ true count
+                        STD     \ backwards
+                   DS   PUSH
+                   ES   POP
+                        REPNE   \
+                        MOVSB   \ move string
+                        CLD     \ forwarrds
+                   BX   POP
+                BP SP   XCHG
+                   SI   POP
+                        END-XCODE
+                        NO-EXPAND
+
+\ if u is greater than zero, copy the contents of u consectutive
+\ address units at addr1 to the u consecutive address units at
+\ addr2. no overlap will occur.
+: MOVE ( addr1 addr2 u -- )
+   ?DUP IF
+      >R  OVER OVER  U< IF  R> CMOVE>  ELSE  R> CMOVE  THEN EXIT
+   THEN DROP DROP ;
+
+\ Store packed string at address a2.
+: PLACE ( ca u ca2)
+   OVER OVER  2>R  1+ SWAP MOVE  2R> C! ;
+
+\ append the FROM string to the TO string.  note that there is no
+\ checking to see if you allocated enough space at the TO location!
+: APPEND ( from len to -- )
+   >R  R@ COUNT + ( f # t')  OVER R> C+!  SWAP CMOVE ;
+
+\ -----
+\ double numbers
+
+\ Drop cell pair x1 x2 from the stack.
+CODE 2DROP ( x1 x2 -- )
+        4 # SP ADD
+        BX POP
+        END-CODE
+
+\ Duplicate cell pair x1 x2.
+CODE 2DUP ( x1 x2 -- x1 x2 x1 x2 )
+        AX POP
+        AX PUSH
+        BX PUSH
+        AX PUSH
+        END-CODE
+
+\ Exchange the top two cell pairs.
+CODE 2SWAP ( x1 x2 x3 x4 -- x3 x4 x1 x2 )
+        AX POP
+        DX POP
+        CX POP
+        AX PUSH
+        BX PUSH
+        CX PUSH
+     DX BX MOV
+        END-CODE
+
+\ Copy cell pair x1 x2 to the top of the stack.
+CODE 2OVER ( x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2 )
+            BX  PUSH
+        SP  DI  MOV
+   12 [DI]  BX  MOV
+            BX  PUSH
+    8 [DI]  BX  MOV
+              END-CODE
+
+\ rotate the cell pair x1 x2 to the top of stack
+: 2ROT ( x1 x2 x3 x4 x5 x6 -- x3 x4 x5 x6 x1 x2 )
+   2>R 2SWAP 2R> 2SWAP ;
+
+\ d is the equivalent of n
+CODE S>D ( n -- d )
+   BX      PUSH
+   BX BX   ADD
+   BX BX   SBB
+   END-CODE
+
+
+\ n is the equivalent of d.  if d lies outside the range of a signed
+\ single-cell number, the result is the lowest 32 bits of d
+CODE D>S ( d -- n )
+                   BX   POP
+                        END-CODE
+
+\ ----- double math
+
+\ add d2|ud2 to d1|ud1 giving the sum d3|ud3
+CODE D+ ( d1|ud1 d2|ud2 -- d3|ud3 )
+                   DX   POP     \ d2=bx:dx
+                   AX   POP     \
+                   CX   POP     \ d1=ax:cx
+                CX DX   ADD     \ dx=lo
+                AX BX   ADC     \ bx=hi
+                   DX   PUSH    \ push
+                        END-CODE
+                        NO-EXPAND
+
+\ d2 is the negation of d1
+CODE DNEGATE ( d1 -- d2 )
+                   AX   POP
+                   BX   NOT
+                   AX   NOT
+               1 # AX   ADD
+               0 # BX   ADC
+                   AX   PUSH
+                        END-CODE
+                        NO-EXPAND
+
+\ +d2 is the absolute value of d1
+CODE DABS ( d1 -- +d2 )
+                BX BX   OR
+                 1 L#   JNS
+                   AX   POP
+                   BX   NOT
+                   AX   NOT
+               1 # AX   ADD
+               0 # BX   ADC
+                   AX   PUSH
+1 L:                    END-CODE
+                        NO-EXPAND
+
+\ subtract d2|ud2 from d1|ud1 giving the difference d3|ud3
+: D- ( d1|ud1 d2|ud2 -- d3|ud3 )
+   DNEGATE D+ ;
+
+\ -----
+\ double memory
+
+\ Store the cell pair x1 x2 at a-addr, with x2 at a-addr and x1 at the
+\ next consecutive cell.  "SWAP OVER ! CELL+ !"
+CODE 2! ( x1 x2 a-addr -- )
+             AX  POP
+      AX  0 [BX] MOV
+             AX  POP
+      AX  4 [BX] MOV
+             BX  POP
+               END-CODE
+
+\ Fetch the cell pair x1 x2 stored at a-addr.  x2 is stored at
+\ a-addr and x1 at the next consecutive cell.  "DUP CELL+ @ SWAP @"
+CODE 2@ ( a-addr -- x1 x2 )
+      4 [BX] AX  MOV
+             AX  PUSH
+      0 [BX] BX  MOV
+               END-CODE
+
+\ -----
+\ double tests
+
+\ flag is true if d|ud is equal to zero
+: D0= ( d|ud -- flag )
+   OR 0= ;
+
+\ flag is true if d is less than zero
+: D0< ( d -- f)
+   NIP 0< ;
+
+\ flag is true if xd1 is bit-for-bit the same as xd2
+: D=  ( xd1 xd2 -- flag )
+   D- OR 0= ;
+
+\ flag is true if d1 is less than d2
+: D< ( d1 d2 -- flag )
+   ROT  2DUP = IF  2DROP U<  EXIT THEN
+   2SWAP 2DROP  > ;
+
+\ flag is true if ud1 is less than ud2
+: DU< ( ud1 ud2 -- flag )
+   ROT  2DUP = IF  2DROP U<  EXIT THEN
+   2SWAP 2DROP      SWAP U< ;
+
+\ d3 is the greater of d1 and d2
+: DMAX ( d1 d2 -- d3 )
+   2OVER 2OVER D< IF  2SWAP  THEN  2DROP ;
+
+\ d3 is the lesser of d1 and d2
+: DMIN ( d d2 -- d3 )
+   2OVER 2OVER D< NOT IF  2SWAP  THEN  2DROP ;
+
+\ ----
+\ if u is greater than zero, store char in each of u consecutive
+\ characters of memory beginning at c-addr
+CODE FILL ( c-addr u char -- )
+                BX AX   MOV     \ char into al
+                   CX   POP     \ count
+                   DI   POP     \ destination
+                DI DI
+                   DS   PUSH    \ FORCE ES
+                   ES   POP
+                        REPNE   \
+                   AL   STOSB   \ store al repeatedly
+                   BX   POP
+                        END-CODE
+                        NO-EXPAND
+
+\ fill u characters of memory with zero
+: ERASE ( c-addr u -- )    0 FILL ;
+
+\ fill u characters of memory with bl
+: BLANK ( c-addr u -- )   BL FILL ;
+
+\ adjust the character string at c-addr1 by n characters.  the resulting
+\ character string is specified by c-addr2 and u2, begins at c-addr1
+\ plus n characters and is u1 minus n characters long. "ROT OVER + ROT ROT -"
+CODE /STRING ( c-addr1 u1 u2 -- c-addr2 u3 )
+        CX POP
+        AX POP
+     BX AX ADD
+        AX PUSH
+     BX CX SUB
+     CX BX MOV
+           END-CODE
+
+\ Compare the string specified by c-addr1 u1 to the string specified by
+\ c-addr2 u2. The strings are compared, and beginning at the given addresses,
+\ character by character, up to the length of the shorter string or until
+\ a difference is found. If the two strings are identical, n is 0. If the
+\ two strings are identical up to the length of the shorter string, n is -1
+\ if u1 is less than u2 and 1 otherwise. If the two strings are not identical
+\ up to the length of the shorter string, n is -1 if the first non-matching
+\ character in the string specified by c-addr1 u1 has a lesser numeric value
+\ than the corresponding character in the string specified by c-addr2 u2
+\ and 1 otherwise.
+XCODE COMPARE ( c-addr1 u1 c-addr2 u2 -- n )
+        SI  PUSH          \ save UP on return stack
+     SP BP  XCHG          \ activate forth stack
+        DI  POP           \ DI = c-addr2, BX = u2
+        CX  POP           \ CX = u1
+     CX DX  MOV           \ make a copy (DX = u1)
+        SI  POP           \ SI = c-addr1
+     BX CX  CMP           \ compare both length
+      1 L#  JL
+     BX CX  MOV
+1 L:                      \ CX = min. length
+            CLD           \ scan in the forward direction
+     DS AX  MOV
+     AX ES  MOV
+  REPE BYTE CMPS          \ compare the strings
+      2 L#  JZ            \ jump if equal
+                          \ mismatch ............................
+        SI  DEC           \ go to the mismatch
+        DI  DEC           \ go to the mismatch
+  0 [SI] 0 [DI] CMP       \ compare both chars
+      6 L#  JL            \ jump: [c-addr1] < [c-addr2]
+    1 # BX  MOV           \ mismatch and c1 > c2   => result = 1
+      4 L#  JU            \ jump to the end
+6 L:
+   -1 # BX  MOV           \ mismatch and c1 < c2   => result = -1
+      4 L#  JU            \ else
+2 L:                      \ match ..............................
+     BX DX  CMP           \ match: compare both length
+      3 L#  JNE           \ jump: length not equal
+    0 # BX  MOV           \ match and length equal => result = 0
+      4 L#  JU            \ jump to the end
+3 L:                      \ match and length not equal
+     BX DX  CMP
+      5 L#  JL            \ jump: BX < DX
+    1 # BX  MOV           \ match and u2 < u1      => result = 1
+      4 L#  JU            \ jump to the end
+5 L:
+   -1 # BX  MOV           \ match and u1 < u2      => result = -1
+      4 L#  JU            \ jump to the end
+4 L: SP BP  XCHG          \ reactivate processor stack
+        SI  POP
+            END-XCODE
+            NO-EXPAND
+
+\ Search the string specified by c-addr1 u1 for the string specified by
+\ c-addr2 u2. If flag is true, a match was found at c-addr3 with u3
+\ characters remaining. If flag is false there was no match and c-addr3
+\ is c-addr1 and u3 is u1.
+: SEARCH ( c-addr1 u1 c-addr2 u2 -- c-addr3 u3 flag )
+   2swap swap dup >r swap 2swap
+   rot dup >r -rot        \ get u1
+   dup                    \ get u2
+   r> swap -              \ calculate number of compares (n = u1 - u2 + 1)
+   dup 0< if r> 2drop 2drop false exit then
+   1+ 0 do                \
+      2over 2over         \ get a copy of everything
+      rot drop dup -rot   \ insert u1 := u2
+      compare             \ make the compare
+      0= if               \ strings equal ?
+         2drop            \ drop c-addr2 u2
+         i -              \ calculate remaining characters
+         -1               \ true
+         unloop r> drop exit
+      else
+         2swap swap 1+ swap 2swap    \ increment c-addr1
+      then
+   loop
+   2drop swap drop r> swap 0 ;
+
+\ ----- 
+
+\ Compare two strings for length bytes.
+\ return  negative if (s1 < s2); 0 if (s1 = s2); positive if (s1 > s2)
+
+\ : COMP ( a1 a2 # -- -/0/+ )
+\    0 DO ( a1 a2)
+\       OVER C@ UPPER
+\       OVER C@ UPPER - ?DUP IF
+\          NIP NIP ( throw addresses and loop index)
+\          0< IF  -1  ELSE  1  THEN
+\          UNLOOP EXIT
+\       THEN
+\       SWAP 1+  SWAP 1+
+\    LOOP  2DROP 0 ;
+ 
+ 
+XCODE COMP ( a1 a2 n -- -/0/+ )
+         si push
+         bp sp xchg
+         bx cx mov         \ count in cx
+         0 # bx mov        \ flag for exit
+         si pop            \ a2 in si
+         di pop            \ a1 in di
+         repe byte cmps    \ compare the strings
+         2 L# je           \ if last chars were equal, we are done
+         3 L# jl           \ otherwise, we have a mismatch, decide which
+         bx dec            \ this is a1 < a2
+         2 L# ju           \ continue
+3 L:     bx inc            \ this is a1 > a2
+         2 L# ju           \ continue
+2 L:     bp sp xchg
+         si pop
+         end-xcode
+         no-expand
+
+\ -----
+\ system variables
+
+: +ORG [ =ORIGIN ] LITERAL + ;
+
+VARIABLE CAPS           \ true if ignoring case
+VARIABLE WARNING        \ true if generating uniq warnings
+VARIABLE STRICT         \ true if ans strict numbers are enforced
+
+| VARIABLE bal  cell allot
+
+CREATE LAST             \ points to
+   0 ,                  \ last nfa
+   0 ,                  \ last macro byte
+   0 ,                  \ last code address
+   0 ,                  \ the thread where the last word was linked
+
+VARIABLE STATE          \ true if compiling, false if interpreting
+
+VARIABLE CONTEXT        \ first search voc
+   =VOCS CELLS ALLOT    \ vocabulary stack
+
+VARIABLE CURRENT        \ where definitions go
+VARIABLE VLINK          \ the newest vocabulary
+
+VARIABLE LCTR
+VARIABLE VIEW#
+
+=DP_INIT CONSTANT DP_INIT
+
+\ ----- user variables
+
+0
+                            \ multi-tasking hooks
+  ( USER TLINK )  1 CELLS + \ link to next task
+  ( USER ACTIVE)  1 CELLS + \ active status
+  ( USER SPSAVE)  1 CELLS + \ place to save the stack pointer
+                  1 CELLS + \ reserved
+                            \ normal user words
+DUP USER SP0      1 CELLS + \ initial data stack pointer
+DUP USER RP0      1 CELLS + \ initial return stack pointer
+DUP USER DP       1 CELLS + \ dictionary pointer
+DUP USER FENCE    1 CELLS + \ and fence for forget
+
+DUP USER #TIB     1 CELLS + \ #chars in the input buffer
+DUP USER 'TIB     1 CELLS + \ address of input buffer
+
+DUP USER BASE     1 CELLS + \ number conversion radix
+
+DUP USER 'EMIT    1 CELLS +
+DUP USER 'EMIT?   1 CELLS +
+DUP USER 'TYPE    1 CELLS +
+DUP USER 'QTYPE   1 CELLS +
+DUP USER 'BLAZE   1 CELLS +
+DUP USER 'CR      1 CELLS +
+DUP USER 'KEY?    1 CELLS +
+DUP USER 'EKEY?   1 CELLS +
+DUP USER 'KEY     1 CELLS +
+DUP USER 'EKEY    1 CELLS +
+DUP USER 'AT      1 CELLS +
+DUP USER 'AT?     1 CELLS +
+DUP USER 'BLOT    1 CELLS +
+DUP USER 'PAGE    1 CELLS +
+
+DUP USER SPAN     1 CELLS + \ #chars input by EXPECT
+DUP USER OUT      1 CELLS + \ number of chars output
+
+DUP USER CSP      1 CELLS + \ save stack pointers
+DUP USER HLD      1 CELLS + \ formated numeric string
+DUP USER DPL      1 CELLS + \ decimal point location
+
+DUP USER HP       1 CELLS + \ error frame pointer
+
+DUP USER FIL      1 CELLS + \ input stream switch
+DUP USER BLK      1 CELLS + \ input stream switch
+DUP USER >IN      1 CELLS + \ input buffer offset
+DUP USER SOURCE-ID  1 CELLS + \ source-id
+
+DUP USER SIGNIFICANT_DIGITS  1 CELLS +  \ number of digits for fp output
+DUP USER COM#     1 CELLS + \ number of the serial port (1...4)
+
+                 17 CELLS + \ a number conversion area, easy to do here!
+DUP USER JOT                \ but confusing, because jot grows down!
+
+DUP CELL / CONSTANT UVARS
+
+( #bytes of user variables) EQU =ULST
+
+\ ----- string parsers
+
+\ return shorter string from first position unequal to byte.
+CODE SKIP ( c-addr1 u char -- c-addr2 u2 )
+   BX AX MOV
+   CX POP
+   1 L# JCXZ
+   DI POP
+   DS PUSH
+   ES POP
+   REPE  BYTE SCAS
+   2 L# JZ
+   CX INC
+   DI DEC
+2 L:
+   DI PUSH
+1 L:
+   CX BX MOV
+   END-CODE
+   NO-EXPAND
+
+\ return shorter string from first position equal to byte.
+CODE SCAN ( c-addr1 u char -- c-addr2 u2 )
+   BX AX MOV
+   CX POP
+   1 L# JCXZ
+   DI POP
+   DS PUSH
+   ES POP
+   REPNE  BYTE SCAS
+   2 L# JNZ
+   CX INC
+   DI DEC
+2 L:
+   DI PUSH
+1 L:
+   CX BX MOV
+   END-CODE
+   NO-EXPAND
+
+\ alter string to suppress trailing blanks.
+CODE -TRAILING ( c-addr u1 -- c-addr u2 )
+                BX CX   MOV
+                   DI   POP
+                   DI   PUSH
+                   DS   PUSH
+                   ES   POP
+             032 # AL   MOV
+                CX DI   ADD
+                   DI   DEC
+                        STD
+                        REPE
+                 BYTE   SCAS
+                 1 L#   JZ
+                   CX   INC
+1 L:
+                        CLD
+                CX BX   MOV
+                        END-CODE
+                        NO-EXPAND
+
+\ ----- divide
+ \
+  \ the sm/mod operator returns signed quotients and remainders as:
+  \
+  \       -a -b  ==  -r +q
+  \       -a +b  ==  -r -q
+  \       +a -b  ==  +r -q
+  \       +a +b  ==  +r +q
+  \
+  \ this is _not_ floored division, but it is intuitively correct.
+  \ [ a / b = q r ] and [ q * b + r = a ]  for all cases.
+
+\ ----- divide high level
+
+\ Signed symmetric mixed-precision divide.
+: SM/REM ( d n -- rem quot)
+   2DUP XOR >R  OVER >R  ABS >R DABS R> UM/MOD
+   SWAP R> 0< IF  NEGATE  THEN
+   SWAP R> 0< IF  NEGATE  THEN ;
+
+\ Signed floored mixed-precision divide.
+: FM/MOD ( d n -- rem quot)
+   DUP >R  2DUP XOR >R  DUP >R  ABS >R DABS R> UM/MOD
+   SWAP R> 0< IF  NEGATE  THEN
+   SWAP R> 0< IF  NEGATE  OVER IF  R@ ROT -  SWAP 1-  THEN THEN
+   R> DROP ;
+
+
+\ Divide n1 by n2, giving the single-cell remainder n3 and the
+\ single-cell quotient n4. If n1 and n2 differ in sign the
+\ result returned will be the same as either the phrase >R S>D R> SM/REM.
+: /MOD ( n1 n2 -- n3 n4 )
+   >R  S>D  R> SM/REM ;
+
+\ Divide n1 by n2, giving the single-cell quotient n3.
+\ If n1 and n2 differ in sign, the result returned will be the
+\ same as the phrase >R S>D SM/REM SWAP DROP.
+: / ( n1 n2 -- n3 )
+   /MOD NIP ;
+
+\ Signed symmetric remainder
+
+: MOD ( n n2 -- rem)
+   /MOD DROP ;
+
+\ signed mixed precision multiply
+
+: M* ( n n -- d )
+   2DUP XOR 0< >R  ABS SWAP ABS UM*  R> IF DNEGATE THEN ;
+
+\ Multiply n1 by n2 producing the intermediate double-cell result
+\ d.  Divide d by n3 producing the single-cell remainder n4 and
+\ the single-cell quotient n5.
+\ If d and n3 differ in sign the result returned will be the same as
+\ the phrase >R M* R> SM/MOD.
+: */MOD ( n1 n2 n3 -- n4 n5 )
+   >R  M*  R> SM/REM ;
+
+\ Multiply n1 by n2 producing the double-cell intermediate result
+\ d.  Divide d by n3 giving the single-cell quotient n4.
+\ If d and n3 differ in sign the result returned will be the
+\ same as either the phrase >R M* R> SM/MOD SWAP DROP.
+: */ ( n1 n2 n3 -- n4 )
+   */MOD NIP ;
+
+\ Add n to d.
+: M+ ( d n -- d2) \ DOUBLE
+   S>D D+ ;
+
+\ -----
+\ triples
+
+\ t2 is the negation of t.
+: TNEGATE ( t -- t2)
+   ROT INVERT 0 1 0 D+ >R  ROT INVERT 0 R> 0 D+ >R
+   ROT INVERT R> + ;
+
+\ Signed double by single multiply to triple result.
+: T* ( d n -- t)
+   2DUP XOR >R  ABS >R  DABS  R>
+   2>R  R@ UM*  0  2R> UM*  D+ ( ie UT*)
+   R> 0< IF  TNEGATE  THEN ;
+
+\ Signed triple by unsigned single symmetric divide to double result.
+: TU/ ( t u -- d)
+   OVER >R >R  DUP 0< IF  TNEGATE  THEN
+   R@ UM/MOD  -ROT  R> UM/MOD  -ROT DROP ( ie UT/)
+   R> 0< IF  DNEGATE  THEN ;
+
+\ Multiply d by n to triple result; divide by +n2 to double result.
+\ Whether division is floored or symmetric depends on TU/
+: M*/ ( d n +n2 -- d2) \ DOUBLE
+   >R T*  R> TU/ ;
+
+
+\ -----
+\ dictionary
+
+: HERE ( -- a )   DP @ ;
+
+\ Reserve n address units of data space.
+: ALLOT ( n -- )
+   DP +! ;
+
+: PAD  ( -- a )   HERE 256 + ;
+: TIB  ( -- a )   'TIB @ ;
+
+: BOUNDS  OVER + SWAP ;
+
+\ Reserve one cell of data space and store x in the cell.
+: ,  ( x -- )
+   HERE  DUP CELL+ DP !  ! ;
+
+\ reserve space for one character in the dictionary and store the
+\ specified character in the space
+: C, ( char -- )   HERE  DUP 1+    DP ! C! ;
+
+\ u is the amount of space remaining in the region addressed by HERE,
+\ in address units
+: UNUSED ( -- u )
+   SP@ HERE - ;
+
+\ -----
+\ io vector execution
+
+: KEY    'KEY   @EXECUTE ;
+: EKEY   'EKEY  @EXECUTE ;
+: KEY?   'KEY?  @EXECUTE ;
+: EKEY?  'EKEY? @EXECUTE ;
+
+: CR     'CR    @EXECUTE ;    \ output appears at the start of the next line
+: EMIT   'EMIT  @EXECUTE ;
+: EMIT?  'EMIT? @EXECUTE ;
+: TYPE   'TYPE  @EXECUTE ;
+: QTYPE  'QTYPE @EXECUTE ;
+: BLAZE  'BLAZE @EXECUTE ;
+
+: AT     'AT    @EXECUTE ;
+: AT?    'AT?   @EXECUTE ;
+: PAGE   'PAGE  @EXECUTE ;
+: BLOT   'BLOT  @EXECUTE ;
+
+: BELL   7 EMIT ;
+
+\ print a space
+: SPACE  ( -- )      BL EMIT  ;
+
+\ print N spaces
+: SPACES ( +n -- )  ?DUP IF 0 DO BL EMIT LOOP  THEN ;
+
+: ZCOUNT ( addr -- addr # )
+   DUP BEGIN ( addr addr)  COUNT 0= UNTIL  OVER - 1- ;
+
+\ ----- 
+
+1 VIEW-T !                        
+EXISTS #OS2 [IF] INCLUDE OS2\OS2BIOS.4   [THEN]   
+EXISTS #DOS [IF] INCLUDE DPMI\DPMIBIOS.4  [THEN]
+0 VIEW-T !
+   
+2 VIEW-T !
+EXISTS #OS2 [IF]  INCLUDE OS2\OS2CON.4 [THEN]
+EXISTS #DOS [IF]  INCLUDE DPMI\DPMICON.4 [THEN]
+0 VIEW-T !
+
+\ -----
+\ numeric conversion bases
+
+: HEX     ( -- )   $10 BASE ! ;  \ set numeric conversion radix to sixteen
+: DECIMAL ( -- )   $0A BASE ! ;  \ set numeric conversion radix to ten
+: OCTAL   ( -- )     8 BASE ! ;  \ set numeric conversion radix to eight
+: BINARY  ( -- )     2 BASE ! ;  \ set numeric conversion radix to two
+
+\ -----
+\ numeric output, single precision
+
+\ Initialize pictured numeric process.
+: <# ( -- )
+   JOT HLD ! ;
+
+\ Drop xd.  Make the pictured numeric output string available as a
+\ character string.  c-addr and u specify the resulting character
+\ string.
+: #> ( xd -- c-addr u )
+   2DROP HLD @ JOT OVER - ;
+
+\ hold a character in the conversion string
+: HOLD ( c -- )
+   -1 HLD +!  HLD @ C! ;
+
+\ Divide ud1 by the number in BASE giving the quotient ud2 and the
+\ remainder n.  (n is the least significant digit of ud1.) Convert n to
+\ external form and add the resulting character to the beginning of the
+\ pictured numeric output string. Typically used between <# and #>.
+: # ( ud1 -- ud2)
+   BASE @ >R  0 R@ UM/MOD  R> SWAP >R  UM/MOD  R>
+   ROT 9 OVER < IF 7 +  THEN
+   [ CHAR 0 ] LITERAL + HOLD ;
+
+\ Convert one digit of ud1 according to the rule for #.  Continue
+\ conversion until the quotient is zero.  ud2 is zero. Typically
+\ used between <# and #>.
+: #S ( ud1 -- ud2 )
+   BEGIN # 2DUP OR 0= UNTIL ;
+
+\ if the number is negative, hold a minus sign
+: SIGN ( n -- )
+   0< IF [CHAR] - HOLD THEN ;
+
+: (D.) ( d -- addr # )
+   SWAP OVER DUP 0< IF DNEGATE THEN
+   <#  #S ROT SIGN  #> ;
+
+\ Display d in free field format; followed by space.
+: D. ( d) \ DOUBLE
+   (D.) TYPE SPACE ;
+
+\ Display u in free field format; followed by space.
+: U. ( u)
+   0 D. ;
+
+\ Display n in free field format.
+: . ( n)
+   DUP 0< D. ;
+
+\ Display d right-justified in field of width n.
+: D.R ( d n) \ DOUBLE
+   >R  (d.)  R> OVER - 0 MAX SPACES  TYPE ;
+
+\ Display n right-justified in field of width n2.
+: .R ( n n2)
+   SWAP DUP 0< ROT D.R ;
+
+\ Display u right-justified in field of width n.
+: U.R ( u n)
+   0 SWAP D.R ;
+
+: H. ( u -- )
+   BASE @ HEX SWAP   8 u.r space base ! ;
+
+\ fetch and print the memory contents
+: ? ( a -- ) @ . ;
+
+\ -----
+\ for s4, alignment is unused.  
+
+\ align the address
+CODE ALIGNED ( addr -- a-addr )
+             END-CODE
+
+\ align the dictionary
+CODE ALIGN ( -- )
+             END-CODE
+
+: _QUOTE   R> COUNT 2DUP + 1+ ALIGNED >R ;
+: _CQUOTE  R> DUP COUNT + 1+ ALIGNED >R ;
+
+\ ----- numeric input, single precision
+
+\ if possible in the current base, convert a character to a number
+\ and return a flag indicating success or failure
+CODE DIGIT ( c base -- n f )
+                                \ BX=BASE
+                   AX   POP     \ AX=CHAR
+          CHAR 0 # AX   SUB     \ AX=AX-'0'
+                 9 L#   JC      \ ERROR IF CARRY
+               9 # AL   CMP     \ GREATER THAN 9
+                 1 L#   JLE
+              17 # AL   CMP     \ BUT LESS THAN 17
+                 9 L#   JC      \ IS AN ERROR
+               7 # AL   SUB     \ OTHERWISE, ADJUST OVER THESE CHARACTERS
+1 L:
+                BL AL   CMP     \ GREATER THAN BASE
+                 9 L#   JNC     \ IS AN ERROR
+                   AX   PUSH    \ RETURN THE VALUE, ASSUMING THE MS16 '0' ALREADY
+                BX BX   XOR     \ BX=0
+                   BX   DEC     \ BX=-1
+                 2 L#   JU
+9 L:
+                   AX   PUSH    \ RETURN BOGUS STACK VALUE
+                BX BX   XOR     \ AND TOS=0
+2 L:                    END-CODE
+                        NO-EXPAND
+
+\ ----- vocabularies
+
+CREATE FORTH-WORDLIST
+HERE EQU =FORTH
+   =THREADS CELLS ALLOT
+
+VARIABLE #ORDER
+
+: GET-ORDER ( -- wid1 .. widn n )
+   #ORDER @ IF
+      #ORDER @ 0 DO
+         #ORDER @  I - 1- CELLS CONTEXT + @
+      LOOP
+   THEN
+   #ORDER @ ;
+
+: SET-ORDER ( wid1 .. widn n -- )
+   DUP -1 =
+      IF  DROP FORTH-WORDLIST 1 THEN
+   DUP #ORDER !
+   ?DUP IF  0 DO  I CELLS CONTEXT + !  LOOP  THEN ;
+
+: SET-CURRENT ( a -- )   CURRENT ! ;
+: GET-CURRENT ( -- a )   CURRENT @ ;
+
+: DISCARD ( x1 .. wu u -- )
+   ?DUP IF 0 DO DROP LOOP  THEN ;
+
+: ONLY   -1 SET-ORDER ;
+
+: ALSO         GET-ORDER OVER SWAP 1+ SET-ORDER ;
+: PREVIOUS     GET-ORDER NIP 1-       SET-ORDER ;
+
+: SEAL         GET-ORDER OVER 1       SET-ORDER  DISCARD ;
+
+: DEFINITIONS  GET-ORDER  OVER SET-CURRENT  DISCARD ;
+
+\ -----
+\ memory dump
+
+: DUMP ( addr n -- )
+   ?DUP IF
+      BASE @ >R HEX
+      ( addr #) BOUNDS DO
+         CR I 8 U.R SPACE  I 16 + I   2DUP
+         DO  I C@  0 <# # # #> TYPE  SPACE  LOOP ."  |"
+         DO  I C@    127 AND BL MAX EMIT     LOOP ." |"
+         KEY? IF UNLOOP R> BASE ! EXIT THEN
+      16 +LOOP
+      CR  R> BASE !  0
+   THEN DROP ;
+
+\ -----
+\ parsing
+
+VARIABLE 'BLOCK
+
+: SOURCE ( -- ca n )
+   BLK @ ?DUP IF 'BLOCK @EXECUTE 1024  ELSE  #TIB 2@  THEN  ;
+
+: /SOURCE ( -- ca u )
+   SOURCE >IN @ /STRING ;
+
+\ leading delimiters are accepted and skipped;
+\ the string is counted and followed by a blank (not counted).
+
+\ : WORD ( c -- a )      \ parse a character-delimited string;
+\    >R  /SOURCE  OVER R> 2>R  R@ SKIP  OVER SWAP  R> SCAN
+\    OVER R> -  SWAP  IF 1+ THEN >IN +!  OVER -  HERE  DUP >R
+\    2DUP C!  1+ SWAP CMOVE  BL R@ COUNT + C!  R> ;
+
+\ ----- 
+
+XCODE _WORD ( char dest addr n -- n' )
+      si push
+      bp sp xchg
+      bx cx mov            \ count in cx
+      di pop               \ source string in di for scas
+      dx pop               \ destination for parsed string
+      ax pop               \ char to parse on in al for scas
+      1 l# jcxz            \ skip all if count is zero
+      repe byte scas       \ skip leading delimiters
+      1 L# je              \ if still equal, the string expired
+      di si mov            \ save start of parsed string in si
+      si dec               \ except di was already incremented
+      repne byte scas      \ skip until trailing delimiter
+      2 L# jne             \ if not end of string
+      di dec               \ decrement di to first blank
+\      cx inc               \ and increment count remaining
+2 L:  cx bx mov            \ save remaining count in bx for return
+      di cx mov            \ end of string in cx
+      si cx sub            \ length of string
+      dx di mov            \ di is destination
+      cl 0 [di] mov        \ write length at destination
+      di inc               \ next char
+      rep movsb            \ copy string from si to di for cx bytes
+      32 # al mov          \ blank
+      al 0 [di] mov        \ and a trailing blank
+      9 L# ju              \ and skip to end
+1 L:  cx bx mov            \ a zero return, no string parsed
+      dx di mov            \ destination
+      0 # al mov           \ count is zero
+      al stosb             \ store char
+      32 # al mov          \ and a blank
+      al stosb             \
+9 L:  bp sp xchg
+      si pop
+      end-xcode
+      no-expand
+
+: WORD ( char -- addr )
+   HERE /SOURCE _WORD #TIB @ SWAP - >IN !  HERE ;
+
+\ ----- 
+\ given a text stream, its length, and a character -- parse the first
+\ substring delimited by the character, return the address and length
+\ of the substring and the number of characters chopped from the source.
+
+CODE _PARSE ( a len char -- a len' chop )
+               BL AL    MOV      \ delimiter
+                  CX    POP      \ get len of source
+                  DI    POP      \ get address of source
+                  DI    PUSH     \ save address for return
+               DI DX    MOV      \ and keep start offset in dx
+                        REPNE
+                BYTE    SCAS     \ scan for delimiter
+                7 L#    JZ       \ if out because match, goto 7
+                                 \ otherwise, string exausted
+               DX DI    SUB      \ calculate the distance from start to delim
+               DI BX    MOV      \ to return as the string chop count
+                  DI    PUSH
+                6 L#    JU
+7 L:                             \ found delimeter
+               DX DI    SUB      \ calculate the distance from start to delim
+               DI BX    MOV      \ to return as the string chop count
+                  DI    DEC
+                  DI    PUSH
+6 L:                    END-CODE
+
+\ return the substring from the input stream delimited by the character
+
+: PARSE ( char "ccc<char>" -- c-addr u )
+   /SOURCE ROT _PARSE  >IN +! ;
+
+\ -----
+
+\ : UPPER ( c -- C )
+\    DUP [CHAR] a [CHAR] { WITHIN IF  BL - THEN ;
+
+CODE UPPER ( c -- C )
+   CHAR a # BL CMP
+   1 L# JL
+   CHAR z # BL CMP
+   1 L# JGE
+   32 # BL XOR
+1 L: 
+   END-CODE
+   
+
+
+\ : UPCASE ( a # -- )
+\    ?DUP IF
+\       BOUNDS DO  I C@ UPPER  I C!  LOOP  0
+\    THEN DROP ;
+
+CODE UPCASE ( a # -- )
+                BX CX   MOV         \ count to cx
+                   DI   POP         \ address in di
+                 3 L#   JCXZ        \ if cx is zero, skip
+1 L:        0 [DI] AL   MOV      
+          CHAR a # AL   CMP
+                 2 L#   JB
+          CHAR z # AL   CMP
+                 2 L#   JA
+              32 # AL   XOR
+            AL 0 [DI]   MOV
+2 L:               DI   INC
+                 1 L#   LOOP
+3 L:               BX   POP
+                        END-CODE
+                        NO-EXPAND
+
+
+\ -----
+
+\ if the word is found the following flags are returned:
+\    1: IMMEDIATE
+\    2: IMMEDIATE and COMPILE-ONLY
+\   -1: NON-IMMEDIATE
+\   -2: NON-IMMEDIATE and COMPILE-ONLY
+
+XCODE SEARCH-THREAD ( c-addr u thread -- 0 | xt 1 | xt 2 | xt -1 | xt -2 )
+                   SI   PUSH    \ save UP on proc stack
+                BP SP   XCHG    \ activate forth stack
+                BX SI   MOV     \ the voc pointer into si
+                   BX   POP     \ get length into BX
+                   DI   POP     \ get addr of string
+                CX CX   XOR     \ set length to zero
+                BL CL   MOV     \ and copy from bx
+             $1F # DX   MOV     \ set the flags mask
+            0 [SI] AX   MOV     \ read first thread
+                AX AX   OR      \ check it for zero
+                 8 L#   JZ      \ and abort if zero
+
+4 L:            AX SI   MOV     \ copy pointer
+                   AL   LODSB   \ get len, si points to 2nd char
+                DL AL   AND     \ mask the flag bits
+                AL BL   CMP     \ and compare with the string's len+char
+                 9 L#   JZ      \ if matched, check rest of string
+
+7 L:       -5 [SI] AX   MOV     \ next link
+                AX AX   OR      \ check it for zero (end of list)
+                 4 L#   JNZ     \ and repeat if non-zero
+
+8 L:            BX BX   XOR     \ end, no match, return a zero flag
+                 1 L#   JU
+
+9 L:               SI   PUSH    \ save, points to 4th char of name
+                   DI   PUSH    \ points to 4th char of text
+                   CX   PUSH    \ and length for the string compare
+
+5 L:               CX   DEC     \ decrement the count
+                 6 L#   JNS     \ if the new count is negative, we are matched
+
+               8 # SP   ADD     \ discard CX and DI
+                   BX   POP     \ and get the name pointer back
+                   SI   INC     \ point to code
+                   SI   PUSH    \ push offset of code
+                   BX   DEC     \ point to flag byte
+            0 [BX] AL   MOV     \ get it
+                AL CL   MOV     \ make a copy
+              -1 # BX   MOV     \ prime for flag
+             $40 # AL   AND     \ check for immediate
+                 2 L#   JZ      \ if $40 bit clear => BX = -1
+               1 # BX   MOV     \ else                BX =  1
+2 L:         $20 # CL   AND     \ check for compile-only
+                 1 L#   JZ      \ if $20 bit clear => BX = BX
+                BX BX   ADD     \ else                BX = BX + BX (2 or -2)
+                 1 L#   JU
+
+6 L:             BYTE   CMPS    \ check the next byte for equality
+                 5 L#   JZ      \ if equal, continue checking
+                   CX   POP     \ otherwise, restore length
+                   DI   POP     \ and pointers to continue threading
+                   SI   POP
+                 7 L#   JU      \ go to threading code
+
+1 L:            BP SP   XCHG
+                   SI   POP
+                        END-XCODE
+                        NO-EXPAND
+
+\ -----
+
+\ convert from a neg-zer-pos flag to a -1/0/+1 flag
+
+: -1/0/+1 ( flag -- flag )
+   DUP IF  0< IF -1 EXIT THEN  1 THEN ;
+
+\ : HASH ( c-addr u -- hash )
+\    0 -ROT BOUNDS DO  
+\       4 LSHIFT  I C@ +  
+\       DUP $F0000000 AND ?DUP IF  24 RSHIFT XOR  $0fffffff and THEN
+\    LOOP  #THREADS MOD ;
+
+XCODE HASH ( c-addr u -- hash )
+      SI PUSH
+      BP SP XCHG     
+      BX DX MOV            \ AND DX IS THE LOOP COUNTER
+      BX BX XOR            \ BX IS THE ACCUMULATOR, INIT = 0
+      AX AX XOR            \ AX IS THE CHARACTER LOAD & ADD REGISTER
+      SI POP               \ SI IS THE ADDRESS POINTER
+1 L:  4 # CL MOV           \ SHIFT FOR ACCUMULATOR
+      BX CL SHL            \ SHIFT LEFT
+      AL LODSB             \ ONE CHAR
+      AX BX ADD            \ INTO THE ACCUMULATOR
+      BX AX MOV            \ COPY FOR DESTRUCTIVE TEST
+      $F0000000 # AX AND   \ MASK FOR HIGH 4 BITS
+      2 L# JZ              \ IF NO HIGH BITS WERE SET, CONTINUE
+      AX BX XOR            \ CLEAR HIGH BITS
+      24 # CL MOV          \ SHIFT 24
+      AX CL SHR            \ TO THE RIGHT
+      AX BX XOR            \ AND XOR BACK INTO THE ACCUMULATOR
+2 L:  DX DEC               \ DECREMENT LOOP COUNTER
+      1 L# JNZ             \ AND CONTINUE WHILE NON ZERO
+      BX AX MOV            \ INTO AX FOR DIVIDE, DX IS ZERO FROM DEC/JNZ
+      =THREADS # BX MOV    \ DIVISOR
+      BX DIV               \ DO DIVISION
+      DX BX MOV            \ RETURN REMAINDER
+      BP SP XCHG
+      SI POP
+      END-XCODE
+      NO-EXPAND
+
+: ?UPCASE ( addr u -- )
+   CAPS @ IF UPCASE EXIT THEN 2DROP ;
+      
+: SEARCH-WORDLIST/CO ( c-addr u wid -- 0 | w 1 | w 2 | w -1 | w -2 )
+   >R 2DUP ?UPCASE 2DUP HASH CELLS R> + SEARCH-THREAD ;
+
+: SEARCH-WORDLIST ( c-addr u wid -- 0 | xt 1 | xt -1 )
+   SEARCH-WORDLIST/CO -1/0/+1 ;
+
+: _FIND ( c-addr -- c-addr 0 | w 1 | w 2 | w -1 | w -2 )
+   0                                \ c-addr flag
+      #ORDER @ ?DUP IF
+         CONTEXT SWAP CELLS BOUNDS DO         
+           OVER COUNT               \ c-addr flag c-addr1 u
+           2DUP HASH CELLS
+           I @ + SEARCH-THREAD      \ c-addr flag [ 0 | xt  1 | xt  2 |
+                                    \                   xt -1 | xt -2 ]
+           ?DUP IF                  \ c-addr flag xt true
+              2SWAP 2DROP           \ xt true
+              UNLOOP EXIT           \
+           THEN                     \ c-addr 0
+        CELL +LOOP                  \ c-addr 0
+     THEN ;
+
+: ?CAPS ( c-addr -- )
+   CAPS @ IF  COUNT UPCASE ELSE DROP THEN ;
+
+
+\   -2: NON-IMMEDIATE and COMPILE-ONLY
+\   -1: NON-IMMEDIATE
+\    0: NOT FOUND
+\    1: IMMEDIATE
+\    2: IMMEDIATE and COMPILE-ONLY
+
+: FIND/CO ( c-addr -- c-addr 0 | w 1 | w 2 | w -1 | w -2 )
+   DUP C@ IF  DUP ?CAPS  _FIND  ELSE  0  THEN ;
+
+
+\   -1: NON-IMMEDIATE
+\    0: NOT FOUND
+\    1: IMMEDIATE
+
+: FIND ( c-addr -- c-addr 0 | w 1 | w -1 )
+   FIND/CO -1/0/+1 ;
+
+
+: DEFINED ( -- c-addr 0 | xt -1 | -- xt 1)
+   BL WORD FIND ;
+
+: EXISTS ( -- flag )
+   DEFINED NIP ;
+
+: ABSENT ( -- flag )
+   DEFINED NIP 0= ;
+   
+\ -----
+\ expect
+
+: EXPECT ( a n -- )
+   >R  0  ( a n)
+   BEGIN  DUP R@
+      <
+   WHILE  KEY 127 ( 7-bit ASCII) AND
+     DUP 8 =  OVER 127 =  OR
+     IF    DROP  DUP
+       IF  1-   8 EMIT  32 EMIT  8 EMIT   else  7 emit  then
+     ELSE  DUP BL < ( #EOL or other special char)
+       IF  DROP  SPAN !  R> 2DROP  EXIT  THEN
+       ( otherwise) >R  2DUP +  R> DUP EMIT  SWAP C!  1+
+     THEN
+   REPEAT  SPAN !  R> drop drop ;
+
+\ -----
+
+: RETURN ( c-addr +n1 +n2 -- c-addr +n2 +n2 )
+   SWAP DROP -1 SWAP ;
+
+: BACKSPACE ( c-addr +n1 +n2 -- c-addr +n1 +n3 )
+   DUP 1 < ?exit  8 EMIT  BL EMIT  8 EMIT  1- ;
+
+: ESCAPE ( c-addr +n1 +n2 -- c-addr +n1 0 )
+   DUP 1 < IF EXIT THEN  DUP 0 DO BACKSPACE LOOP ;
+
+\ an indexed array of vectors for control key actions
+CREATE CONTROL-KEYS
+   (  0) ' NOOP ,
+   (  1) ' NOOP ,
+   (  2) ' NOOP ,
+   (  3) ' NOOP ,
+   (  4) ' NOOP ,
+   (  5) ' NOOP ,
+   (  6) ' NOOP ,
+   (  7) ' NOOP ,
+   (  8) ' BACKSPACE ,
+   (  9) ' NOOP ,
+   ( 10) ' NOOP ,
+   ( 11) ' NOOP ,
+   ( 12) ' NOOP ,
+   ( 13) ' RETURN ,
+   ( 14) ' NOOP ,
+   ( 15) ' NOOP ,
+   ( 16) ' NOOP ,
+   ( 17) ' NOOP ,
+   ( 18) ' NOOP ,
+   ( 19) ' NOOP ,
+   ( 20) ' NOOP ,
+   ( 21) ' NOOP ,
+   ( 22) ' NOOP ,
+   ( 23) ' NOOP ,
+   ( 24) ' NOOP ,
+   ( 25) ' NOOP ,
+   ( 26) ' NOOP ,
+   ( 27) ' ESCAPE ,
+   ( 28) ' NOOP ,
+   ( 29) ' NOOP ,
+   ( 30) ' NOOP ,
+   ( 31) ' NOOP ,
+
+VARIABLE CTRLKEY
+
+: CTRL-ACCEPT ( c-addr +n1 +n2 char -- c-addr +n1 +n3 )
+    DUP CTRLKEY !  31 AND  CELLS CONTROL-KEYS + @EXECUTE ;
+
+: CHAR-ACCEPT ( c-addr +n1 +n2 char -- c-addr +n1 +n3 )
+   >R  2DUP > IF   ( OK  )   ROT 2DUP + R@ SWAP C!  -ROT 1+  R>
+              ELSE ( FULL)   R> DROP  7
+              THEN
+   EMIT ;
+
+: ACCEPT ( c-addr +n1 -- +n2 )
+   0 BEGIN ( C-ADDR +N1 +N2 )
+      OVER 0 > WHILE
+      EKEY  DUP 255 AND  32 <  IF CTRL-ACCEPT  ELSE CHAR-ACCEPT  THEN
+   REPEAT -ROT 2DROP ;
+
+1024 DS ACCEPT-BUFFER
+
+
+\ get 80 characters to the terminal input buffer and setup for interpret
+: QUERY ( -- )
+   TIB 80 ACCEPT #TIB !  0 >IN ! ;
+
+\ -----
+\ errors
+
+\ execute the code address and return a zero or error number
+: CATCH ( ca -- 0 | n )
+   SP@ >R  HP @ >R       \ save old error frame
+   RP@ HP !              \ set this error frame
+   EXECUTE               \ execute the desired routine
+   R> HP !               \ restore the old frame
+   R> DROP  0 ;
+
+\ reset the error handler, and return to whomever called CATCH with
+\ the error number (usually an address of a string) on the stack.
+: _THROW ( 0 -- | n -- n )
+   ?DUP IF
+      HP @ RP!         \ set RP so we can bypass CATCH
+      R> HP !          \ reset the old handler
+      R> SWAP >R SP!   \ reset the stack pointer
+      DROP R>          \ and return the error number
+   THEN ;
+
+\ Empty the data stack and perform the function of QUIT without
+\ displaying a message.
+: ABORT ( i*x -- ) ( R: j*x -- )
+   -1 THROW ;
+
+CREATE MSG   0 , 0 ,
+
+: ERR ( a # -- )
+   MSG 2!  -2 THROW ;
+
+
+: HUH? ( f -- )
+   0= ABORT" ?" ;
+
+
+\ -----
+\ numeric input
+
+| : BASED ( addr # -- addr # )
+   OVER C@ [ CHAR $ ] LITERAL = IF  HEX       1 /STRING  EXIT  THEN
+   OVER C@ [ CHAR & ] LITERAL = IF  OCTAL     1 /STRING  EXIT  THEN
+   OVER C@ [ CHAR % ] LITERAL = IF  BINARY    1 /STRING  EXIT  THEN ;
+
+\ ud2 is the result of converting the characters within the
+\ character string specified by c-addr1 u into digits, using the
+\ number in BASE, and adding each into ud1 after multiplying ud1
+\ by the number in BASE.  Conversion continues until a character
+\ that is not convertible is encountered or the string is entirely
+\ converted.  c-addr2 is the location of the first unconverted
+\ character or the first character past the end of the string if
+\ the string was entirely converted.  u2 is the number of
+\ unconverted characters in the string. overflow is ignored.
+: >NUMBER ( ud1 c-addr1 u1 -- ud2 c-addr2 u2 )
+   BEGIN  DUP >R
+   WHILE  DUP >R  C@ BASE @ DIGIT
+   WHILE  SWAP  BASE @ UM* DROP  ROT  BASE @ UM*  D+  R> R> 1 /STRING
+   REPEAT DROP R>  THEN  R> ;
+
+\ String to number conversion primitive.  True if d is valid.
+\ Returns d if number ends in final '.' and sets dpl = 0
+\ Returns n if no punctuation present   and sets dpl = 0<
+\ Returns d if number contains imbedded punctuation ,-./:
+\ and sets dpl = index of rightmost punctuation.
+: _VAL? ( ca u -- d 2 , n 1 , 0)
+   BASE @ >R  BASED
+   0 0 2SWAP  -1 DPL !
+   OVER C@ [ CHAR - ] LITERAL = DUP >R  ABS /STRING
+   BEGIN  >NUMBER  DUP
+   WHILE  OVER C@  DUP [ CHAR : ] LITERAL =
+          SWAP [ CHAR , ] LITERAL [ CHAR / ] LITERAL 1+ WITHIN  OR
+   WHILE  OVER DPL !  1 /STRING  REPEAT THEN
+   2SWAP  R> IF  DNEGATE  THEN
+   2SWAP  DUP IF  2DROP 2DROP  0  R> BASE !  EXIT THEN
+   +  DPL @ 1+  DUP ( double?)
+   IF  -  DPL !  2  ELSE  2DROP DROP  1  THEN  R> BASE ! ;
+
+VARIABLE 'VAL?
+: VAL?   'VAL? @EXECUTE ;
+
+' _VAL? 'VAL? !-T
+
+\ convert the char sequence at a+1 and accumulate it in +d.
+\ a2 is the address of the first non-convertable digit.
+: CONVERT ( ud1 a1 -- ud2 a2)
+   BEGIN  1+ DUP >R  C@ BASE @ DIGIT
+   WHILE  SWAP  BASE @ UM* DROP  ROT  BASE @ UM*  D+  R>
+   REPEAT DROP  R> ;
+
+\ -----
+\ state
+
+\ switch to interpretation
+: [ ( -- )
+   0 STATE ! ; IMMEDIATE/COMPILE-ONLY
+
+\ begin compilation
+: ] ( -- )
+   -1 STATE ! ;
+
+\ -----
+\ macro compiler
+
+| $87E5 CONSTANT "XCHG_BP,SP"
+
+VARIABLE LASTOP
+
+| : >LASTOP ( n -- )
+   $FF AND  LASTOP @ $FF AND BFLIP OR  LASTOP ! ;
+
+| : ,OP ( b -- )   DUP >LASTOP C, ;
+
+| : ,NOP   $90 ,OP ;
+
+: ,CALL ( addr -- )
+   HERE 15 AND 10 = IF ,NOP THEN
+   $E8 ,OP  HERE - 4 - , ;
+
+| : ,ACALL ( addr -- )
+   HERE 2 AND 0= IF ,NOP ,NOP THEN
+   HERE 1 AND 0= IF ,NOP      THEN
+   ,CALL ;
+
+| : PEEPHOLE ( addr # -- addr # )
+   LASTOP @ "XCHG_BP,SP" = IF
+      OVER H@ BFLIP "XCHG_BP,SP" = IF
+         -2 ALLOT  2 /STRING
+      THEN
+   THEN ;
+
+| : EXPAND ( addr # -- )
+   PEEPHOLE BOUNDS DO I C@ ,OP LOOP ;
+
+| : MAC ( cfa -- n )
+   BEGIN 1- DUP C@ $80 AND UNTIL  C@ $7F AND ;
+
+: COMPILE, ( xt -- )
+   DUP MAC ?DUP IF ( cfa n)  EXPAND  ELSE  ,CALL  THEN ; COMPILE-ONLY
+
+: CALL ( xt -- )
+   DUP MAC ?DUP IF ( cfa n)  EXPAND  ELSE  ,CALL  THEN ;
+
+
+\ -----
+\ compiler primitives
+
+\ Parse name delimited by a space, ignoring leading delimiters.
+\ Find name and return xt, the execution token for name. if the
+\ name is not found, abort.
+\ When interpreting, ' name EXECUTE is equivalent to name.
+: ' ( "name" -- xt )
+   BL WORD  DUP C@ HUH?  FIND HUH? ;
+
+: PATCH ( n addr -- )
+   6 - ! ;
+
+\ compile a literal, short or long
+: LITERAL ( n -- )
+   POSTPONE CELL HERE PATCH ; IMMEDIATE/COMPILE-ONLY
+
+\ compile a literal, double
+: 2LITERAL ( d -- )
+   SWAP
+   POSTPONE LITERAL
+   POSTPONE LITERAL ; IMMEDIATE/COMPILE-ONLY
+
+\ compile a literal, string
+: SLITERAL ( c-addr1 u -- )   ( -- c-addr1 u )
+   POSTPONE _QUOTE  
+   HERE PLACE  HERE C@ 1+ ALLOT 0 C,  ALIGN ; IMMEDIATE/COMPILE-ONLY
+
+
+: [']
+   ' POSTPONE LITERAL ; IMMEDIATE/COMPILE-ONLY
+
+\ Compile the top w stack items as numeric literals.
+: VAL, ( ... w)
+   DUP BEGIN  ROT >R                 1- ?DUP 0= UNTIL
+       BEGIN  R>  POSTPONE  LITERAL  1- ?DUP 0= UNTIL ;
+
+: STRING  ( char -- )
+   WORD C@ 1+ ALLOT 0 C, ALIGN ;
+
+\ compile a counted string
+: ," ( -- )
+   [CHAR] " STRING ;
+
+\ POSTPone execution of <name>; error if not found
+\
+: POSTPONE ( "name ")
+   BL WORD  DUP C@ HUH?  FIND  DUP HUH?  0<
+   IF     ( non-immediate)  POSTPONE LITERAL  POSTPONE COMPILE,
+   ELSE   ( immediate    )  COMPILE,
+   THEN ; IMMEDIATE/COMPILE-ONLY
+
+: [COMPILE] ( "name ")
+   POSTPONE POSTPONE ; IMMEDIATE/COMPILE-ONLY
+
+\ -----
+
+: WHAT? ( caddr n -- )
+   TYPE TRUE ABORT" ?" ;
+
+VARIABLE 'UNDEFINED   ' WHAT? 'UNDEFINED !-t
+
+\ The interpreter proper.
+: INTERPRET ( )
+   BEGIN
+      BL WORD DUP C@ WHILE
+      FIND/CO ?DUP ( found?)
+      IF
+         STATE @ IF          \ STATE = compiling
+            0< IF
+               COMPILE,      \ WORD = non-immediate
+            ELSE
+               EXECUTE       \ WORD = immediate
+            THEN
+         ELSE                \ STATE = interpreting
+            ABS 1 = IF
+               EXECUTE       \ WORD = non-compile-only
+            ELSE
+               -14 THROW     \ WORD = compile-only
+            THEN
+         THEN
+      ELSE  
+         DUP >R  COUNT VAL?  
+         ?DUP IF    STATE @ IF  VAL,  ELSE  DROP  THEN  R> DROP 
+              ELSE  R> COUNT 'UNDEFINED @EXECUTE
+              THEN
+      THEN
+   REPEAT DROP ;
+
+\ evaluate a counted string, saving the caller's evaluation string
+: EVALUATE ( b u -- )
+   #TIB 2@ 2>R  FIL @ >R  >IN @ >R SOURCE-ID @ >R
+   #TIB 2!  >IN OFF  FIL ON -1 SOURCE-ID !
+   [ ' INTERPRET ] LITERAL CATCH
+   DUP ( * ) IF CR ." EVAL: " #TIB 2@ TYPE  THEN
+   R> SOURCE-ID ! R> >IN ! R> FIL ! 2R> #TIB 2! ( * ) THROW ;
+
+\ -----
+
+\ +n is the number of single-cell values contained in the data stack
+\ before +n was placed on the stack
+CODE DEPTH ( -- +n )
+                   BX   PUSH
+      4 CELLS [SI] BX   MOV
+                SP BX   SUB
+                BX AX   MOV
+                        CWD
+                   BX   SAR
+                   BX   SAR
+                        END-CODE
+
+\ copy the Nth item on the stack to the top
+: PICK ( +n -- n )
+   1+ CELLS SP@ + @ ;
+
+\ Rotates kth item to top of stack, k<32
+: ROLL ( nm .. nk .. n1 n0 k -- nm .. n1 n0 nk)
+   DUP  BEGIN  ?DUP WHILE  ROT >R   1- REPEAT
+        BEGIN  ?DUP WHILE  R> -ROT  1- REPEAT ;
+
+
+\ print stack contents
+: .S ( ? -- ? )
+   CR DEPTH IF DEPTH 0 DO SP0 @ I 1+ CELLS - @ . LOOP THEN ;
+
+\ Status check.
+: OK? ( )
+\   DEPTH 0< ABORT" Stack?"
+   DEPTH 0< IF -4 THROW THEN
+   STATE @ 0= IF  ."  ok"  THEN ;
+
+\ -----
+
+\ ----- structures
+
+: -BAL   -1 BAL +! ;
+: +BAL    1 BAL +! ;
+
+\ structure references and resolutions
+: >MARK      HERE                   +BAL ;
+: >RESOLVE   HERE OVER - SWAP PATCH -BAL ;
+: <MARK      HERE                   +BAL ;
+: <RESOLVE   HERE - HERE PATCH      -BAL ;
+
+: IF     POSTPONE _IF     >MARK       ; IMMEDIATE/COMPILE-ONLY
+: THEN   POSTPONE _BEGIN  >RESOLVE    ; IMMEDIATE/COMPILE-ONLY
+: ELSE   POSTPONE _AGAIN  >MARK  SWAP
+         POSTPONE _BEGIN  >RESOLVE    ; IMMEDIATE/COMPILE-ONLY
+
+: AHEAD  POSTPONE _AGAIN  >MARK       ; IMMEDIATE/COMPILE-ONLY
+         
+: BEGIN  POSTPONE _BEGIN  <MARK    ; IMMEDIATE/COMPILE-ONLY
+: AGAIN  POSTPONE _AGAIN  <RESOLVE ; IMMEDIATE/COMPILE-ONLY
+: UNTIL  POSTPONE _IF     <RESOLVE ; IMMEDIATE/COMPILE-ONLY
+
+: WHILE  POSTPONE _IF  >MARK SWAP  ; IMMEDIATE/COMPILE-ONLY
+: REPEAT POSTPONE _AGAIN  <RESOLVE
+         POSTPONE _BEGIN  >RESOLVE ; IMMEDIATE/COMPILE-ONLY
+
+
+0 CONSTANT CASE IMMEDIATE/COMPILE-ONLY
+
+: OF
+   1 + >R
+   POSTPONE OVER POSTPONE =
+   POSTPONE IF POSTPONE DROP
+   R>
+; IMMEDIATE/COMPILE-ONLY
+
+: ENDOF
+   >R POSTPONE ELSE R>
+; IMMEDIATE/COMPILE-ONLY
+
+: ENDCASE
+   POSTPONE DROP
+   ?DUP
+   IF
+      0 DO
+         POSTPONE THEN
+      LOOP
+   THEN
+; IMMEDIATE/COMPILE-ONLY
+
+\ -----
+
+: CATCH-CASE ( n -- )
+   CASE
+       -2 OF CR HERE COUNT TYPE  SPACE MSG 2@ TYPE ENDOF
+       -4 OF ." data stack underflow" ENDOF
+      -10 OF ." division by zero" ENDOF
+\      -13 OF ." undefined word" ENDOF
+      -14 OF ." interpreting a compile-only word" ENDOF
+   ENDCASE  ;
+
+: QUIT ( -- )
+   BEGIN
+      RP0 @ RP!         \ clear return stack
+      -1 VIEW# !
+      POSTPONE [
+      BEGIN
+         CR QUERY SPACE
+         [ ' INTERPRET ] LITERAL CATCH
+         ?DUP 0=
+      WHILE
+         [ ' OK? ] LITERAL CATCH
+         ?DUP
+      UNTIL
+      THEN
+      CATCH-CASE
+      SP0 @ SP!
+   AGAIN ;
+
+\ ----- headers look like (not quite correct...)
+ \
+  \                4     1   1   1   1   1   1   1   1
+  \            ÚÄÄÄÄÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄ¿
+  \            ³ link  ³ # ³ t ³ e ³ s ³ t ³ _ ³ _ ³ _ ³
+  \            ÀÄÄÄ³ÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÙ
+  \                ÀÄns+Ä¿                  (padded with blanks and )
+  \                      ³                  (aligned to even cells  )
+  \                      v
+  \            ÚÄÄÄÄÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄÂÄÄÄ¿
+  \            ³ link  ³ # ³ t ³ r ³ y ³
+  \            ÀÄÄÄ³ÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÁÄÄÄÙ
+  \                ÀÄÄÄÄÄ¿
+  \                      v
+  \
+
+: ,LINK ( hash -- )
+   CELLS CURRENT @ ( wid) + ( thread)  \ figure which thread
+   DUP LAST 3 CELLS + !                \ keep which thread we used
+   DUP @ ,                             \ link new to last entry in thread
+   HERE SWAP ! ;                       \ and the thread to it
+
+
+\ create a header 
+
+: HEAD_ALIGN ( n -- )
+   10 + HERE + 15 AND  16 SWAP - ALLOT ;
+
+\ if the name is already defined, tell me
+: ?UNIQUE ( a -- )
+   WARNING @ IF
+      DUP  FIND IF ."  reDef " OVER COUNT TYPE THEN DROP
+   THEN DROP ;
+
+: ,HEADER ( addr n -- )
+   ( n) DUP HEAD_ALIGN
+   ( *) 2DUP HASH >R                    \ save hash for link
+   ( *) HERE 2 CELLS + PLACE            \ put the name (which might be at HERE)
+   VIEW# @ 24 LSHIFT lctr @ OR ,        \ store the view field
+   R> ,LINK                             \ make a link
+   HERE ( %) DUP LAST !                 \ for HIDE and REVEAL
+   ( %) C@ DUP ( #) $80 OR C,           \ comma the count over itself 
+   ( #) ALLOT                           \ allocate name
+   HERE LAST CELL+ !                    
+   $80 C,                               \ set the macro byte initially zero
+   HERE LAST 2 CELLS + ! ;              
+
+: HEADER 
+   BL WORD DUP C@ IF
+      ( a) DUP ?UNIQUE                  \ report unique-ness
+      ( a) COUNT 31 MIN ( *)            \ get addr and count
+      CAPS @ IF ( *) 2DUP UPCASE THEN   \ maybe make uppercase
+      ,HEADER
+      EXIT
+   THEN TRUE ABORT" name" ;
+
+\ link the last word into the current vocabulary
+: REVEAL ( -- )
+   LAST @ ?DUP IF LAST 3 CELLS + @ ! THEN ;
+
+: HIDE ( -- )
+   LAST @ ?DUP IF LAST 3 CELLS + @ DUP @ CELL - @  SWAP !  DROP  THEN ;
+
+: IMMEDIATE
+   LAST @ C@  $40 OR  LAST @ C! ;
+
+: IMMEDIATE/COMPILE-ONLY
+   LAST @ C@  $60 OR  LAST @ C! ;
+
+: COMPILE-ONLY
+   LAST @ C@  $20 OR  LAST @ C! ;
+
+\ -----
+
+\ terminate a colon definition
+\
+\         Compilation:    ( colon-sys -- )
+\
+\ Compile EXIT (or an implementation-dependent word that performs an
+\ equivalent function) in the current definition.  End the current word
+\ definition and allow it to be found in the dictionary.  Enter
+\ interpretation state.  colon-sys is balanced by the corresponding :
+\ or :NONAME.
+\
+\         Execution:      ( -- )  ( R:  sys -- )
+\
+\ Return control to the caller of the definition containing ;.  sys is
+\ balanced by the corresponding : or :NONAME.
+\
+
+: END-DEFINITION
+   BAL 2@ OR ABORT" unbalanced"  STATE OFF  REVEAL ; 
+
+
+: ;
+   END-DEFINITION  $C3 ,OP ; IMMEDIATE/COMPILE-ONLY
+
+\ begin a colon definition
+\
+\         Usage:  : name  <words>  ;
+\
+\ ( "name" -- colon-sys )
+\
+\ Parse name delimited by a space, ignoring leading delimiters.  Create
+\ a dictionary entry for name.  Enter compilation state.  The execution
+\ semantics of name will be determined by the words compiled into the
+\ body of the definition following execution of : (colon) until the
+\ execution of ; (semi-colon).  The newly created word definition for
+\ name cannot be found in the dictionary until the definition is
+\ completed.
+\
+\ name is called a "colon definition".
+\
+\ colon-sys is balanced by the corresponding ;.
+\
+\         name Execution: ( i*x -- j*x )  ( R:  -- sys )
+\
+\ Save implementation-dependent information (sys) about the definition
+\ that called name and perform the body of the definition.
+\
+
+DOVAR CONSTANT =VAR
+
+: :
+   HEADER HIDE  0 0 BAL 2!  ] ;
+
+: :NONAME ( -- xt )
+   $80 C,  HERE ( xt)   0 0 BAL 2!  LAST OFF  ] ;
+
+\ create an executable entity which will return its body address
+: CREATE ( "name" -- )
+   HEADER  [ DOVAR ] LITERAL ,CALL ;
+
+\ create a variable
+: VARIABLE ( "name" -- ) CREATE 0 , ;
+
+\ create a double-variable
+: 2VARIABLE ( "name" -- ) CREATE 0 , 0 , ;
+
+\ create a constant called "name" whose value at execution is x
+: CONSTANT ( x "name" -- )
+   HEADER  [ DOCON ] LITERAL ,CALL , ;
+
+\ create a double-constant called "name" whose value at execution is x
+: 2CONSTANT ( x "name" -- )
+   HEADER  [ DO2CON ] LITERAL ,CALL , , ;
+
+\ -----
+\ a-addr is the data field address corresponding to xt for a
+\ word defined via CREATE.
+
+CODE >BODY ( xt -- a-addr )
+        5 # BX ADD
+        END-CODE
+
+CODE BODY> ( xt -- a-addr )
+        5 # BX SUB
+        END-CODE
+
+: >NAME ( xt -- nfa )
+   BEGIN 1- DUP C@ $80 AND UNTIL   \ find macro bit
+   BEGIN 1- DUP C@ $80 AND UNTIL ; \ find flag bit
+
+: NAME> ( nfa -- xt )
+   count $1f and + 1+ aligned ;
+
+: >LINK ( xt -- lfa )   >NAME CELL - ;
+: >VIEW ( xt -- lfa )   >NAME 2 CELLS - ;
+
+: ?DEFINE ( -- addr )
+   >IN @  DEFINED IF  NIP >NAME ELSE DROP >IN ! CREATE  LAST @  THEN ;
+
+\ -----
+
+: RECURSE
+   LAST @ NAME> COMPILE, ; IMMEDIATE/COMPILE-ONLY
+
+\ -----
+
+\ on its entry, the top item 
+\ on the processor stack will point to the body of the defined 
+\ word, bx will be top of data stack, and the rest of the data
+\ stack will be in memory at BP
+
+XCODE DODOES
+    4 # BP  SUB                         \ allocate a space on dstack
+ BX  0 [BP] MOV                         \ push tos onto it
+        BX  POP                         \ and get the body address to tos
+        END-XCODE
+
+\ when executed, force the newly created routine to call the
+\ address "following" the (;code).  
+
+: (;CODE)
+   R> ALIGNED ( addr to call to)
+   LAST @ NAME> >BODY -
+   LAST @ NAME> $E8 OVER C! 1+ ! ;
+
+: DOES>
+   POSTPONE (;CODE)  POSTPONE DODOES ; IMMEDIATE/COMPILE-ONLY
+
+
+\ leave builds a chain in balx
+
+: LEAVE
+   POSTPONE UNLOOP
+   POSTPONE _AGAIN
+   bal cell+ @ here patch  here bal cell+ ! ;  IMMEDIATE/COMPILE-ONLY
+
+\ Gathers LEAVEs.  Courtesy of Wil Baden.
+
+: RAKE ( sys)
+   bal cell+ @
+   BEGIN ( loopstart link)
+      2DUP U< WHILE
+      DUP 6 - @  SWAP  HERE OVER - SWAP PATCH
+   REPEAT
+   bal cell+ !  DROP ;
+
+\ sys1 indicates ?do if true, sys2 is the target for loop
+
+: DO ( -- sys1 sys2 )
+   POSTPONE _DO
+   POSTPONE _BEGIN
+   0 ( sys1) <MARK ; IMMEDIATE/COMPILE-ONLY
+
+: LOOP ( sys1 sys2 -- ) ( or: sys3 sys1 sys2 )
+   POSTPONE _LOOP
+   DUP ( sys2) <RESOLVE
+       ( sys2) RAKE
+   ( sys1) IF
+      POSTPONE THEN
+   THEN ; IMMEDIATE/COMPILE-ONLY
+
+: +LOOP ( sys1 sys2 -- ) ( or: sys3 sys1 sys2 )
+   POSTPONE _+LOOP
+   DUP ( sys2) <RESOLVE
+       ( sys2) RAKE
+   ( sys1) IF
+      POSTPONE THEN
+   THEN ; IMMEDIATE/COMPILE-ONLY
+
+: ?DO ( -- sys1 sys2 )
+   POSTPONE _?DO >MARK
+   POSTPONE _DO
+   POSTPONE _BEGIN
+   1 <MARK ; IMMEDIATE/COMPILE-ONLY
+
+\ -----
+
+: S" ( "ccc"<"> -- addr # )
+   STATE @ IF  POSTPONE _QUOTE ,"  EXIT  THEN
+   [CHAR] " PARSE  PAD PLACE  PAD COUNT ; IMMEDIATE
+
+: C"
+   POSTPONE _CQUOTE  ," ; IMMEDIATE/COMPILE-ONLY
+
+\         Compilation:    ( "ccc<">" -- )
+\
+\ Parse characters ccc delimited by " (double-quote) and compile an
+\ executable sequence to print the string.
+: ."  \ compiling: ( "ccc<">" -- )  executing: ( -- )
+   POSTPONE S" POSTPONE TYPE ; IMMEDIATE/COMPILE-ONLY
+
+: "   POSTPONE S" ; IMMEDIATE
+
+: .(   [CHAR] ) PARSE TYPE ; IMMEDIATE
+
+\
+\         Compilation:    ( "ccc<">" -- )
+\
+\ Parse characters ccc delimited by a double quote mark.
+\
+\         Execution:      ( i*x x1 -- ) ( R: j*x -- )
+\
+\ If all bits of x1 are zero, execute the sequence of words after
+\ ccc<">.  Otherwise, display ccc and perform an
+\ implementation-defined error abort sequence which includes the
+\ function of ABORT.
+\
+: ABORT" \ comp: ( "ccc<">" -- ) exec: ( i*x x1 -- ) ( R: j*x -- )
+   POSTPONE IF POSTPONE S" POSTPONE ERR POSTPONE THEN ; IMMEDIATE/COMPILE-ONLY
+
+\ Parse name delimited by a space, ignoring leading delimiters.
+\ Put the integer value of its first character onto the stack.
+: CHAR ( "name" -- char )
+   BL WORD 1+ C@ ;
+
+\ Parse name delimited by a space, ignoring leading delimiters.
+\ Put the integer value of its first character shifted into the
+\ control character space (by the -64) onto the stack.
+: CTRL ( "name" -- char-64 )
+   CHAR UPPER 64 - ;
+
+
+\ compile-mode reference to the next character in the input stream
+: [CHAR]
+   CHAR  POSTPONE LITERAL ;  IMMEDIATE/COMPILE-ONLY
+
+\ compile-mode reference to the next character in the input stream
+: [CTRL]
+   CTRL  POSTPONE LITERAL ;  IMMEDIATE/COMPILE-ONLY
+
+\ disk
+\ -----
+
+: HASDOT? ( addr -- flag )
+   COUNT [CHAR] . SCAN NIP ;
+
+\ file interface for S4
+
+| CREATE "CRLF   2 C, 13 C, 10 C,  0 C,
+| CREATE "BL     1 C, 32 C,
+
+|   9 CONSTANT #FILS  \ Number of open files + 1 scratch file.
+| 256 CONSTANT EVL#   \ file EVAL maximum line size.
+|  52 CONSTANT FCB#   \ Size of fcb in bytes.
+
+
+\ File control blocks.
+
+9 52 * DS FCBS
+
+| : WIPE_FCBS   FCBS  #FILS FCB# * ERASE  ;
+
+\ Return first available fcb.
+: FCB= ( -- fileid )
+   FCBS  #FILS 1+ 0 DO  DUP C@ 0= IF  UNLOOP EXIT  THEN  fcb# + LOOP
+   ABORT" Too many files" ;
+
+\ Move file name into fileid as ASCIIZ string.
+: N>FCB ( a u fileid )
+   CELL+  2DUP + 0 SWAP C!  SWAP CMOVE ;
+
+\ Recover file name from fileid.
+: FCB>N ( fileid -- a u )
+   CELL+ 50  2DUP 0 SCAN  NIP - ;
+
+3 VIEW-T !
+EXISTS #OS2 [IF] INCLUDE OS2\OS2FILE.4 [THEN]
+EXISTS #DOS [IF] INCLUDE DPMI\DPMIFILE.4 [THEN]
+0 VIEW-T !
+
+\ Write line followed by end-of-line sequence to file.
+: WRITE-LINE ( ca u fileid -- ior) \ FILE
+   DUP >R  WRITE-FILE DROP  "CRLF COUNT R> WRITE-FILE ;
+
+\ Read line from file into buffer.
+\ u2 bytes are actually read.  Next-to-top false on end-of-file.
+\ This implementation converts bad reads into end-of-file.
+\ Files ending [CR LF] force an extra empty line.
+
+: READ-LINE ( a u fileid -- 0 0 0 | u2 t 0 | ? ? ior)
+   >R  2DUP 1+ R@ READ-FILE ( a u u2 ior)  0= AND
+   DUP 0= IF  R> 2DROP 2DROP  0 0 0 EXIT  THEN ( end of file)
+   >R OVER R> TUCK  13 SCAN  NIP ( a u u2 u3)
+   ?DUP IF    2 ( byte CRLF) OVER - >R -
+        ELSE  2DUP U< >R  THEN  MIN R> ( a u4 #seek)
+   ?DUP IF  S>D 1 R@ SEEK-FILE DROP  2DROP  THEN
+   NIP  R> DROP  TRUE 0 ;
+
+
+\ -----
+
+VARIABLE UPD    \ True if block updated.
+
+| 1024 DS BUF     \ The only block buffer.  Also used by SAVE
+|    8 DS AFIL    \ two cells for current block fileid
+                  \ and current block number
+
+\ Like BUFFER but within a given file.
+| : FILE-BUFFER ( u fileid -- a )
+   DUP 0= ABORT" No BLOCK file"     upd @
+   IF   afil 2@ >R  1024 UM* R@ REPOSITION-FILE DROP
+        buf 1024 R> WRITE-FILE DROP  upd OFF
+   THEN  afil 2!  buf ;
+
+\ Like BLOCK but within a given file.
+| : FILE-BLOCK ( u fileid -- a )
+   2DUP afil 2@ D= IF  2DROP  buf  EXIT THEN
+   2DUP FILE-BUFFER DROP  >R  1024 UM* R@ REPOSITION-FILE DROP
+   buf 1024 R> READ-FILE 2DROP  buf ;
+
+
+VARIABLE BLOCK-FID   \ Global block file.
+
+\ BLOCK reads 1K block from mass storage into memory.
+: BLOCK ( u -- a)
+   BLOCK-FID @ FILE-BLOCK ;
+
+' BLOCK 'BLOCK !-T
+   
+\ Prepares a BUFFER for use by BLOCK
+: BUFFER ( u -- a)
+   BLOCK-FID @ FILE-BUFFER ;
+
+\ Mark BUFFER as updated.
+: UPDATE
+   upd ON ;
+
+\ Write BUFFER, if updated.
+: SAVE-BUFFERS
+   afil 2@ DUP IF  FILE-BUFFER  afil @ FLUSH-FILE  THEN  2DROP ;
+
+: EMPTY-BUFFERS
+   0 0 afil 2!  upd OFF ;
+
+\ Save, then unassign BUFFER.
+: FLUSH
+   SAVE-BUFFERS  EMPTY-BUFFERS ;
+
+
+VARIABLE SCR      \ Block most recently LISTed
+
+\ Display block; set SCR to block number.
+: LIST ( u )
+   DUP SCR !  BLOCK
+   16 0 DO  CR 64  2DUP -TRAILING TYPE  + LOOP  CR DROP ;
+
+\ -----
+
+VARIABLE WATCHING           \ IF TRUE, DISPLAY THE LINES READ BY REFILL
+
+  260 DS EL       \ EVAL line BUFFER.
+    8 DS LPOS
+
+\ Reload the current input stream; action depends on FIL and BLK
+: _REFILL ( -- f )
+   BLK @ ( from block?)
+   IF  1 BLK +!  >IN OFF  BLK @ 1+ 1024 UM*  1 0 D-
+       BLOCK-FID @ FILE-SIZE DROP  DU<  EXIT
+   THEN
+   FIL @ ( text file?)   ?DUP
+   IF  DUP TRUE = ( eval?) IF  0=  EXIT THEN
+       FILE-POSITION DROP  lpos 2!   1 lctr +!
+       el evL# FIL @ READ-LINE DROP  SWAP #TIB !  >IN OFF
+       WATCHING @ IF TIB #TIB @ TYPE CR THEN
+       EXIT
+   THEN
+   QUERY TRUE ;
+
+VARIABLE 'REFILL
+' _REFILL 'REFILL !-T
+
+: REFILL   'REFILL @ EXECUTE ;
+
+\ Save the input stream position.
+: SAVE-INPUT ( -- x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 12 )
+   >IN @
+   lpos 2@
+   #tib 2@
+   fil 2@
+   lctr @
+   view# @
+   blk @ block-fid @
+   source-id @
+   12 ;
+
+\ Restore the input stream position.
+\ Assumes the input stream has not been changed.
+\ True if the input stream cannot be restored to this position.
+: RESTORE-INPUT ( x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 12 -- )
+   12 = not abort" bad restore"
+   source-id !
+   block-fid !  blk !
+   view# !
+   lctr !  fil 2!  #tib 2!  lpos 2!  >in !
+   FIL @ 0 >
+   IF   lpos 2@ FIL @ REPOSITION-FILE DROP
+        el evL# FIL @ READ-LINE 2DROP  #TIB !
+   THEN  FALSE ;
+
+
+\ File evaluation error handler.
+: FERR ( n -- n)
+   BLK @ FIL @ 0 > OR
+   IF  CR ." In file "  BLK @ IF  BLOCK-FID  ELSE  FIL  THEN
+       @ fcb>n TYPE     BLK @
+       IF
+          ."  block "  BLK ?
+       ELSE
+             ."  line: "   LCTR ?  >IN ?  CR
+             el  #TIB @ ?DUP IF
+                0 DO  I >IN @ = IF ." ^" THEN
+                       DUP C@ EMIT  1+
+                LOOP
+             THEN DROP
+       THEN
+   THEN ;
+
+\ Interpret the given block.
+: LOAD-FILE ( u fileid)
+   SAVE-INPUT n>r
+   BLOCK-FID ! BLK !  >IN OFF
+   ['] INTERPRET CATCH  DUP ( * ) IF  ferr  THEN
+   nr> RESTORE-INPUT drop ( * ) THROW ;
+
+\ Interpret the given global block.
+: LOAD ( u )
+   BLOCK-FID @ LOAD-FILE ;
+
+\ LOAD a range of global blocks.
+: THRU ( u u2)
+   CR 1+ SWAP DO  ." ." I LOAD  LOOP ;
+
+: USING
+   BL WORD COUNT R/W OPEN-FILE ABORT" no file" BLOCK-FID ! ;
+
+\ -----
+
+\ Evaluate a file.  Assumes file position is zero.
+: INCLUDE-FILE ( fileid) \ FILE
+   SAVE-INPUT n>r
+   ( fileid) >R
+   0 R@ FIL 2!  el 'TIB !  0 lctr !
+   BEGIN  REFILL  DUP ( dummy * )
+   WHILE  DROP  ['] INTERPRET CATCH
+          DUP ( * ) IF  ferr  THEN  ?DUP
+   UNTIL THEN
+   R> CLOSE-FILE DROP
+   nr> RESTORE-INPUT DROP ( * )
+   THROW ;
+
+\ Interpret the given source file.
+: INCLUDED ( ca u)
+   R/O OPEN-FILE ABORT" ?"  INCLUDE-FILE ;
+
+: FEXT.4 ( addr -- )
+   DUP HASDOT? IF DROP EXIT THEN   " .4" ROT APPEND ;
+
+CREATE LAST-LOADED  64 ALLOT
+
+: RE
+   LAST-LOADED COUNT INCLUDED ;
+
+\ Interpret the given source file.
+: (INCLUDE) ( "<name> ")
+   BL WORD  DUP C@ HUH?  DUP FEXT.4  COUNT LAST-LOADED PLACE RE ;
+
+CREATE VIEW-FILES   
+   1 ,                  \ reserve the marker for this file
+   63 CELLS ALLOT       \ room for 63 move view files
+
+\ scan view file list for an empty entry (zero) or an entry which
+\ is greater than HERE
+
+: NEXT_VIEW ( -- n | -1 )
+   VIEW-FILES  64 0 DO ( addr)
+      DUP @ IF ( non-zero)
+         DUP @ HERE U> IF ( is after here, therefore invalid)
+            DROP I UNLOOP EXIT
+         THEN
+      ELSE ( was zero, use it)
+         DROP I UNLOOP EXIT
+      THEN
+      CELL+
+   LOOP DROP -1 ;
+
+
+: VIEWS ( n "name" -- )
+   ?DEFINE SWAP CELLS VIEW-FILES + ! ;
+
+: INCLUDE ( "<name> " )
+   VIEW# @ >R
+   NEXT_VIEW VIEW# !  
+   >IN @ >R   VIEW# @ VIEWS  R> >IN !  
+   (INCLUDE) 
+   R> VIEW# ! ;
+
+\ -----
+
+\ Treat the rest of the line as a comment, like this one.
+: \ ( " ccc")
+   BLK @ IF  >IN @ 63 + -64 AND  ELSE  #TIB @  THEN  >IN ! ;
+IMMEDIATE
+
+: ?\ ( flag -- )
+   IF POSTPONE \ THEN ;
+
+\ Parse characters ccc delimited by a closing parenthesis ")".
+\ Ignore the resulting text.  ( is an immediate word.
+\
+\ When parsing, the number of characters in ccc may be zero to the
+\ number of characters remaining in the input stream.
+\
+: (    \  ( "ccc<)>" -- )
+   FIL @ BLK @ 0= AND
+   IF  BEGIN  /SOURCE  [CHAR] ) SCAN   DUP NOT
+       WHILE  2DROP  REFILL NOT IF  #TIB @ >IN ! EXIT  THEN  REPEAT
+       #TIB @ SWAP - 1+  >IN !  DROP
+   ELSE  [CHAR] ) PARSE 2DROP  THEN ;
+IMMEDIATE
+
+
+\ -----
+\ words
+
+  CREATE C/L  60 ,
+
+| VARIABLE RMARGIN
+| variable #words
+| variable nuff
+
+| : NUFF?
+   key? if
+      key 27 = if  nuff on  true exit  then
+      key 27 = if  nuff on  true exit  then
+   then nuff @ ;
+
+: .ID ( na -- )
+   out @ c/l @ > if cr RMARGIN @ SPACES then
+   COUNT 31 AND TYPE ."   "  1 #words +! ;
+
+\ get a words filter, all uppercase; text at here
+| : get-filter ( -- flag )
+   here 32 erase
+   >in @ >r
+   bl word count upcase
+   >in @ r> -  0<> ;
+
+| : str= ( str -- flag )
+   here count bounds do ( addr -- flag )
+      count $7F AND  i c@
+      - if
+         drop 0 unloop exit
+      then
+   loop drop 1 ;
+
+| : filter? ( nfa -- flag )
+   count 31 and bounds do
+      i str= if  unloop  1 exit  then
+   loop 0 ;
+
+| : .name ( nfa -- )
+   here c@ if ( filtering)
+      dup filter? if .ID else drop then
+      exit
+   then .ID ;
+
+| : LARGEST ( a n -- a' n')
+   OVER 0 SWAP ROT
+   0 DO ( 'lg lg a )
+      2DUP @   \ 'lg lg a lg x
+      U<  IF   \ 'lg lg a
+         -ROT 2DROP  DUP @ OVER  THEN
+      CELL+
+   LOOP DROP ;
+
+| : ANOTHER ( -- nfa )
+   PAD #THREADS LARGEST
+   DUP  IF  DUP CELL - @ ROT !  ELSE  NIP  THEN ;
+
+| : WORDS-WID ( wid -- )
+   PAD #THREADS CELLS CMOVE            \ copy the wid to pad
+   100 OUT ! BEGIN
+      nuff? ?EXIT
+      ANOTHER ?DUP 
+   WHILE
+      .NAME
+   REPEAT ;
+
+| : FILTER-WORDS
+   8 RMARGIN !
+   VLINK BEGIN
+      @  DUP WHILE
+      nuff? if drop exit then
+      CR DUP  CELL- BODY> >NAME .ID
+      DUP  @ ( wid) WORDS-WID
+      CELL-
+   REPEAT DROP ;
+
+: WORDS ( -- )
+   #words off  nuff off
+   get-filter IF
+      FILTER-WORDS
+   ELSE
+      RMARGIN OFF  context @ WORDS-WID
+   THEN
+   cr #words ? ." words." ;
+
+: WID-WORDS ( wid -- )
+   0 HERE C!  WORDS-WID ;
+   
+\ -----
+
+EXISTS #DOS [IF]
+
+\ data space for editor, reserved here to reduce executable image size
+\ do not change these lightly....
+
+128 1024 * DS EDBUF          \ edit buffer
+
+ 16   64 * DS FILENAMES      \ filenames
+ 16   20 * DS POSITIONS      \ file positions for edit
+
+ $1000 DS LSTACK             \ deleted lines for editor
+     0 DS _LSTACK            \ marks end of unlines
+
+[THEN]
+     
+\ ----- hardware reset
+
+0 DS END_RS
+
+VERSION# 1+ CONSTANT VERSION#
+TIME&DATE   CONSTANT _YEAR
+            CONSTANT _MONTH
+            CONSTANT _DAY
+            CONSTANT _HOUR
+            CONSTANT _MINUTE
+            CONSTANT _SECOND
+
+
+: COPYRIGHT
+   CR ." 32/FORTH (C) 1993,1994 Rick VanNorman" ;
+
+: .DATE ( day month year -- )
+   swap  0 <# [char] / hold # # #> type
+   swap  0 <# [char] / hold # # #> type
+         0 <#           # # # # #> type ;
+
+: .TIME ( sec min hour -- )
+   0 <# [CHAR] : HOLD # # #> TYPE
+   0 <# [CHAR] : HOLD # # #> TYPE
+   0 <#               # # #> TYPE ;
+
+: VERSION
+   CR ." version " VERSION# 0 <# # # [CHAR] . HOLD #S #> TYPE
+      ."  compiled on " _DAY _MONTH _YEAR .DATE
+      ."  at " _SECOND _MINUTE _HOUR .TIME ;
+
+: STDIO
+   ['] _EMIT  'EMIT  !
+   ['] _EMIT? 'EMIT? !
+   ['] _TYPE  'TYPE  !
+   ['] _TYPE  'QTYPE !
+   ['] _TYPE  'BLAZE !
+   ['] _CR    'CR    !
+   ['] _KEY?  'KEY?  !
+   ['] _KEY   'KEY   !
+   ['] _EKEY? 'EKEY? !
+   ['] _EKEY  'EKEY  !
+   ['] NOOP   'PAGE  !
+   ['] NOOP   'BLOT  !
+   ['] 2DROP  'AT    !
+   ['] NOOP   'AT?   !
+   ['] _THROW 'THROW ! ;
+
+CREATE 'STARTUP  0 ,
+
+\ -----
+
+: FYI
+   CR $110 +ORG @                 12 U.R ."  bytes: dictionary size  (ORG+$110)"
+   CR $114 +ORG @                 12 U.R ."  bytes: reserved memory  (ORG+$114)"
+   CR $118 +ORG @ CELL /          12 U.R ."  cells: user variables   (ORG+$118)"
+   CR $11C +ORG @ CELL /          12 U.R ."  cells: return stack     (ORG+$11C)"
+   CR $120 +ORG @                 12 U.R ."  bytes: tib              (ORG+$120)"
+   CR
+   CR SP@ HERE -                  12 U.R ."  dictionary bytes free"
+   CR $110 +ORG @ END_RS - +ORG   12 U.R ."  reserved memory free"
+   CR $118 +ORG @ CELL / UVARS -  12 U.R ."  available user cells" ;
+
+\ ----- ARGC
+\ Parse the DOS-supplied Command line 
+
+\ skip to the Nth word in the string, leave a truncated string
+: NTH ( ADDR # N -- ADDR # )
+   ?DUP IF 0 DO BL SKIP BL SCAN LOOP THEN
+   BL SKIP OVER SWAP BL SCAN DROP OVER - ;
+
+\ argc returns the number of arguments in the command string,
+\ which is always >= 1 (since the program name qualifies as
+\ an argument)
+: ARGC ( -- n )
+   1 0 CMDLINE 0 DO ( count last addr)
+      COUNT  BL <=  ROT OVER < IF  ROT 1+ -ROT THEN  SWAP
+   LOOP 2DROP ;
+
+\ argv returns the address and length of the requested argument
+\ from the command tail.  if argument zero is requested, the
+\ fully qualified program name is returned; otherwise the argument
+\ is parsed from the command tail.  note that command tail args
+\ are indexed from 1 **not** zero
+: ARGV ( n -- a # )
+   ?DUP IF ( from command tail)
+      DUP ARGC < NOT IF
+         DROP 0 0 EXIT
+      THEN
+      CMDLINE ROT ( addr len #) 1- NTH
+   ELSE ( program name from the environment)
+      CMDNAME
+   THEN ;
+
+\ -----
+
+: COLD ( -- )
+   RP0 @ RP!  SP0 @ SP!
+   DP_INIT @ DUP DP ! FENCE !
+   BLK OFF  FIL OFF
+   sp0 @ cell+ 'TIB !
+   CAPS on WARNING ON
+   ONLY ALSO DEFINITIONS DECIMAL
+   STATE OFF SOURCE-ID OFF
+   WIPE_FCBS
+   -1 VIEW# !  STDIO
+   [
+
+EXISTS #OS2 [IF]  ] KBDINIT              [   [THEN]
+EXISTS #DOS [IF]  ] 0 SEG>DESC GS! VINIT [   [THEN]
+
+   ]
+   'STARTUP @EXECUTE
+   COPYRIGHT VERSION
+   CMDLINE ['] evaluate CATCH IF BYE THEN
+   QUIT ;
+
+EXISTS #OS2 [IF] 1 CONSTANT #OS2 [THEN]
+EXISTS #DOS [IF] 1 CONSTANT #DOS [THEN]
+
+
+\ -----
+\ POWER is called from the loader 
+
+LABEL POWER
+
+EXISTS #OS2 [IF]
+
+     BX DosVECTORS #)   MOV      \ 
+            CX 'em #)   mov      \ SET RUNSIZE AS TOLD!
+       DX 'CMDLINE #)   MOV      \ save pointer to parameter frame   
+   ax 'environment #)   mov      \ save environment pointer
+      si modhandle #)   mov      \ save the module handle
+     
+            'em #) ax   mov      \ memory size
+         =ORIGIN # AX   ADD      \ adjust for base
+
+          'res# #) ax   sub      \ start of reserved area   
+             ax rs #)   mov      \ save
+
+[THEN]
+
+EXISTS #DOS [IF]
+
+        AX REALSEL #)   MOV     \ save realsel
+        BX REALSEG #)   MOV     \ and realseg
+        CX REALES  #)   MOV     \ and es for exit
+       DX CALLERDS #)   MOV     \ save caller's ds
+       SI LINADDR  #)   MOV     \ save linear address of allocation
+
+                        CLI     \ interrupts off
+                DS DX   MOV     \ copy ds
+                DX ES   MOV     \ into es
+                DX SS   MOV     \ ds also into ss
+                        STI     \ interrupts on
+
+            'em #) ax   mov     \ top of memory
+
+          'res# #) ax   sub     \ start of reserved area
+             ax rs #)   mov     \ save
+
+[THEN]
+
+           'up# #) ax   sub      \ start of user area
+                ax si   mov      \ save
+                ax di   mov      \ save for addressing...
+
+            cell # ax   sub      \ top of return stack
+      ax 5 cells [di]   mov      \ save
+                AX SP   MOV      \ SET INITIAL FORTH RP
+
+           'rp# #) ax   sub      \ bottom of return stack
+          'tib# #) ax   sub      \ start of tib (cell above sp0)
+            cell # ax   sub      \ top of data stack
+      ax 4 cells [di]   mov      \ save
+
+                AX BP   MOV      \ initial forth sp for stack
+
+                        CLD      \ set direction forwards (for next)
+            ' COLD #)   JMP      \ set up threader and start forth
+
+\ ----- end of kernel, with a few concessions to the meta compiler
+\ these statements must go at the highest memory used for the dictionary,
+\ because they pertain to the "save" size
+
+  DP-T @ EQU =CTOP
+LAST-T @ EQU =LAST
+
+LINKS-T =FORTH THERE  =THREADS CELLS CMOVE
+
+\ ----- cold start code, goes at $100
+
+=pwr org   power #) jmp
+
+\ ----- set the final system variable from the meta compiler
+
+=CTOP  =DP_INIT !-T
+=LAST  LAST     !-T

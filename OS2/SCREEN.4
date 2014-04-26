@@ -1,0 +1,23 @@
+VIOSCROLLDN          \ TopRow LeftCol BotRow RtCol cbLines pbCellULONG hvio 
+
+VARIABLE ATTRIBUTES  \ $0720 will be attribute 7, char 20 for scroll fill
+
+: TEST
+   0 ATTRIBUTES 1 70 20 10 4 VIOSCROLLDN ;
+
+: STUFF
+   24 0 DO
+      CR 79 0 DO I J + 79 MOD BL + EMIT LOOP 
+   LOOP ;
+
+: corners ( -- x0 y0 xl yl )
+   xorg @ yorg @ xlim @ ylim @ ;
+   
+: w_scrolldn   0 attr_normal 1 corners vioscrolldn drop ; 
+: w_scrollup   0 attr_normal 1 corners vioscrollup drop ;
+
+
+
+: ?scroll
+   cursor @ vlimit @ < not if  w_scrollup  b/line cursor -! 0 out ! then ;
+

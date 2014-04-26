@@ -1,0 +1,598 @@
+\ ----- 32/FORTH METACOMPILER
+
+\ exists is only valid if the word is above the system FENCE.  this
+\ is so that the relevant "system" type may be declared at compile time
+
+: EXISTS ( -- 0 | xt )
+   DEFINED IF FENCE @ U< NOT ELSE DROP FALSE THEN ;   
+
+
+STDIO
+
+: EXISTS\ BL WORD FIND NIP IF POSTPONE \ THEN ; IMMEDIATE
+: x.s base @ >r hex .s r> base ! ;
+
+exists\ listing 0 constant listing
+
+WARNING OFF
+CAPS ON
+
+\ -----
+
+ONLY FORTH ALSO DEFINITIONS
+
+: PANIC   ONLY FORTH ALSO DEFINITIONS QUIT ;
+
+: HEX. ( n)
+   BASE @ >R HEX
+      <# # # # # #> TYPE SPACE
+   R> BASE ! ;
+
+: F-EXECUTE   EXECUTE ;
+
+: ?FOUND ( f -- )
+   0= IF ." meta?" PANIC  THEN ;
+
+: DEFINED ( -- xt )
+   BL WORD COUNT  2DUP UPCASE  CONTEXT @ SEARCH-WORDLIST ?FOUND ;
+
+: 'F   ' ;
+
+: SAVE-TARGET
+   BL WORD COUNT  DUP HUH?
+   ( a #)  W/O CREATE-FILE ABORT" can't create" ( fileid) >R
+   " =PWR THERE  =CTOP =PWR - DUP PAD CELL+ ! " EVALUATE R@ WRITE-FILE DROP
+   $6E766372 PAD ! PAD 2 CELLS R@ WRITE-FILE DROP 
+   R> CLOSE-FILE DROP ;
+
+\ ----- set up the meta compiler vocabularies
+
+VOCABULARY META
+VOCABULARY TARGET
+VOCABULARY TRANSITION
+
+
+ONLY FORTH ALSO META ALSO DEFINITIONS
+
+\ -----
+
+: IN-TARGET       ONLY TARGET DEFINITIONS ;
+: IN-META         ONLY FORTH ALSO META ALSO DEFINITIONS ;
+: IN-TRANSITION   ONLY TARGET ALSO DEFINITIONS TRANSITION ;
+
+: [FORTH]        FORTH      ;  IMMEDIATE
+: [META]         META       ;  IMMEDIATE
+: [ASM]          ASSEMBLER  ;  IMMEDIATE
+: [TRANSITION]   TRANSITION ;  IMMEDIATE
+
+CREATE SWITCHER
+   2 CELLS ALLOT
+   CONTEXT @ CURRENT @ SWITCHER 2!
+
+: SWITCH
+   CONTEXT @  CURRENT @  SWITCHER 2@
+   CURRENT !  CONTEXT !  SWITCHER 2! ;
+
+\ ----- target dictionary
+
+\ define the target dictionary,
+
+VARIABLE TBASE  0 TBASE !
+
+CREATE TDICT  $20000 ALLOT
+TDICT $FFFF ERASE
+
+VARIABLE DP-T   \ CODE POINTER
+VARIABLE DS-T   \ DATA POINTER
+
+VARIABLE MAC-T
+VARIABLE MAC-H
+VARIABLE BODY-T
+
+$87E5 CONSTANT "XCHG_BP,SP"
+
+VARIABLE META-STATE
+
+\ ----- target dictionary management
+
+: ORG ( a)   DP-T ! ;
+
+: THERE ( TA - HA)      TDICT + TBASE @ - ;  \ TRANSLATE TARGET TO HOST ADDRESS
+
+: HERE-T ( - A)         DP-T @ ;        \ NEXT CODE LOCATION IN TARGET
+: ALLOT-T ( N)          DP-T +! ;       \ ALLOCATE CODE SPACE
+
+: ALIGN-T ;
+
+:  !-T ( N ADDR)    THERE  ! ;
+: H!-T ( N ADDR)    THERE H! ;
+: C!-T ( N ADDR)    THERE C! ;
+
+:  @-T ( ADDR - N)   THERE  @ ;
+: H@-T ( ADDR - N)   THERE H@ ;
+: C@-T ( ADDR - N)   THERE C@ ;
+
+:  ,-T ( N)   HERE-T  !-T  4 ALLOT-T ;
+: H,-T ( N)   HERE-T H!-T  2 ALLOT-T ;
+: C,-T ( N)   HERE-T C!-T  1 ALLOT-T ;
+
+: DW ( n)   ,-T ;
+
+: S,-T ( a # -- )
+   DUP C,-T  ?DUP IF  BOUNDS DO I C@ C,-T LOOP 0 C,-T ALIGN-T EXIT THEN DROP ;
+
+INCLUDE APPS\LISTER.4
+
+: ORG ( a -- )   DUP 1 BREAK-LINE  ORG ;
+
+: >MARK ( -- ADDR )      HERE-T ;
+: >RESOLVE ( ADDR -- )   HERE-T OVER -  SWAP 6 - !-T ;
+
+: <MARK ( -- ADDR )      HERE-T ;
+: <RESOLVE ( ADDR -- )   HERE-T - HERE-T 6 - !-T ;
+
+
+\ -----
+
+: TDUMP ( addr n -- )
+   ?DUP IF
+      BASE @ >R HEX
+      ( addr #) BOUNDS DO
+         CR I 8 U.R SPACE  I 16 + I   2DUP
+         DO  I C@-T 0 <# # # #> TYPE  SPACE  LOOP ."  |"
+         DO  I C@-T  127 AND BL MAX EMIT     LOOP ." |"
+         KEY? IF UNLOOP R> BASE ! EXIT THEN
+      16 +LOOP
+      CR  R> BASE !  0
+   THEN DROP ;
+
+\ ----- meta branching constructs, absolute branching
+\ branches in the target take the form
+\            BP SP XCHG
+\            BX BX OR
+\               BX POP
+\            BP SP XCHG
+\             1 L# JNZ
+\        TARGET #) JMP
+\ 1 L:
+
+
+\ ----- assembler interface
+
+\ the assembler needs single entry points for c, and w,
+
+ASSEMBLER ALSO
+
+' ALLOT-T IS ASM-ALLOT
+' HERE-T  IS AHERE
+'   C!-T  IS ASM8!
+
+
+ONLY FORTH ALSO META ALSO DEFINITIONS
+
+\ ----- target header definition
+
+\ the target head segment will be a simple linked list, no threads
+VARIABLE LAST-T
+VARIABLE VIEW-T
+
+\ ----- headers in the target look like (not quite right)
+ \
+  \  здддддддбдддбдддбдддбдддбдддбдддбдддбддд©
+  \  Ё link  Ё # Ё t Ё e Ё s Ё t Ё<M>Ё   Ё   Ё \ padded with blank and
+  \  юдддЁдддадддадддадддадддадддадддадддаддды \ aligned to even cells
+  \      юддддд©                               \ the <M> is the macro
+  \            v                               \ byte, indicating
+  \  здддддддбдддбдддбдддбдддбдддбдддбдддбддд© \   00= must call
+  \  Ё link  Ё # Ё t Ё r Ё y Ё<M>Ё   Ё   Ё   Ё \   FF= immediate
+  \  юдддЁдддадддадддадддадддадддадддадддаддды \ else= bytes to expand
+  \      юддддд©
+  \            v
+  \  здддддддбдддбдддбдддбддд©
+  \  Ё link  Ё # Ё x Ё y Ё<M>Ё
+  \  юдддЁдддадддадддадддаддды
+  \      юддддд©
+  \            v
+  \
+
+: VIEWFIELD ( -- n )
+   LCTR @ VIEW-T @ 24 LSHIFT OR ;
+
+: PARA-ALIGN-T
+   >IN @ >R  BL WORD C@  R> >IN !       \ #bytes for name
+   2 CHARS +                            \ 1 byte for count, 1 for maclen
+   2 CELLS +                            \ 1 cell for link, 1 for view
+   HERE-T + 15 AND 16 SWAP - ALLOT-T ;
+
+\ a list of threads for the target compilation, and a constant to define
+\ its size
+
+VARIABLE THREADS-T
+   
+CREATE LINKS-T     10240 CELLS ALLOT       \ max number of threads
+       LINKS-T     10240 CELLS ERASE
+
+: HASH-T ( c-addr u -- hash )
+   0 -ROT BOUNDS DO  
+      4 LSHIFT  I C@ +  
+      DUP $F0000000 AND ?DUP IF  DUP 24 RSHIFT OR XOR  THEN
+   LOOP  THREADS-T @ MOD ;
+
+: LINKED-T ( hashcode -- )
+   CELLS LINKS-T +               \ calculate where this link belongs
+   DUP @ ,-T  HERE-T SWAP !      \ link this header
+   HERE-T LAST-T !               \ point to lexicon of latest
+   NEW-LINE ;                    \ and format for listing
+
+: MAKE-HEADER-T
+   PARA-ALIGN-T
+   VIEWFIELD ,-T                  \ view field
+   BL WORD COUNT ( *)             \ parse word, leave c-addr
+   ( *) 2DUP HASH-T LINKED-T      \ link the name
+   ( *) HERE-T THERE PLACE        \ put into dictionary
+   $80 HERE-T THERE COR!          \ marker bit
+   HERE-T C@-T $1F AND 1+ ALLOT-T \ allocate space for the header
+   NEW-LINE                       \
+   HERE-T MAC-T !  $80 C,-T       \ remember where the macro byte is
+   HERE-T BODY-T !                \ MARK START OF BODY
+   NEW-LINE ;                     \ and finish with a new line
+
+VARIABLE MAKE_HEAD   1 MAKE_HEAD !
+VARIABLE MADE_HEAD
+
+: |
+   MAKE_HEAD OFF  MADE_HEAD OFF ;
+
+: HEADER-T
+   NEW-LINE            \ start a fresh line
+   MAKE_HEAD @ IF    MAKE-HEADER-T  MADE_HEAD ON
+               ELSE  BL WORD DROP
+               THEN
+   MAKE_HEAD ON ;
+
+\ ----- create a target entity
+
+VARIABLE THEOP
+
+: >THEOP ( n -- )   $FF AND  THEOP @ $FF AND $100 * +  THEOP ! ;
+
+: ,OP-T ( b -- )   DUP >THEOP C,-T ;
+
+: ,CALL-T ( addr -- )   $E8 ,OP-T  HERE-T - 4 - ,-T ;
+
+: PEEPHOLE ( addr # -- addr # )
+   THEOP @ "XCHG_BP,SP" = IF
+      OVER H@-T BFLIP "XCHG_BP,SP" = IF
+         -2 ALLOT-T  2 /STRING
+      THEN
+   THEN ;
+
+: EXPAND ( addr -- )
+   DUP @ SWAP CELL+ @ ( addr # -- ) PEEPHOLE
+   BOUNDS DO ( i=addr in target)
+      I C@-T ,OP-T
+   LOOP ;
+
+: REFERENCE ( addr -- )
+   DUP CELL+ @  IF ( macro) EXPAND  ELSE  @ ,CALL-T  THEN ;
+
+\ every entry in the target system must also be resident in the host
+\ system as an executable entity.  each word will be in the TARGET
+\ vocabulary and when executed, will store a reference to itself in the
+\ list space
+
+: TARGET-CREATE
+   >IN @ HEADER-T >IN !
+   IN-TARGET CREATE IN-META
+      HERE-T ,
+      HERE MAC-H !  0 ,  ( macro byte in host)
+   DOES>
+      NEW-LINE REFERENCE ;
+
+: RECREATE
+   >IN @  TARGET-CREATE  >IN ! ;
+
+: SET-MACLEN ( n -- )
+   MADE_HEAD @ IF
+      DUP $80 OR MAC-T @ C!-T  MAC-H @ !
+   ELSE
+      DROP
+   THEN ;
+
+
+: !MAC-LEN
+   HERE-T BODY-T @ -  SET-MACLEN ;
+
+: MACRO
+   HERE-T 1- BODY-T @ - SET-MACLEN ;
+
+
+\ ----- define code words
+
+: XCODE
+   TARGET-CREATE  ASSEMBLER [ASM] READY ;
+
+: CODE
+   XCODE  BP SP XCHG ;
+
+: LABEL
+   HERE-T 2 BREAK-LINE
+   HERE-T CONSTANT ASSEMBLER [ASM] READY ;
+
+ASSEMBLER ALSO DEFINITIONS
+
+: END-XCODE
+   !MAC-LEN NEW-LINE RET NEW-LINE IN-META ;
+
+: END-CODE
+   NEW-LINE BP SP XCHG  END-XCODE ;
+
+ONLY FORTH ALSO  META ALSO DEFINITIONS
+
+\ -----
+
+: DE-FINED ( -- ca f )          \ f=1 immediate f=-1 normal
+   CONTEXT @ >R
+      TARGET
+      BL WORD COUNT  2DUP UPCASE  CONTEXT @ SEARCH-WORDLIST  DUP ?FOUND
+   R> CONTEXT ! ;
+
+
+\ Look up the next word in the input stream only in the TARGET vocabulary,
+\ disturbing nothing else.
+: 'T ( -- ca )
+   CONTEXT @  TARGET DEFINED SWAP CONTEXT !  ;
+
+\ ----- transition definitions
+ \
+  \ transition is a vocabulary that holds the "immediate" words for
+  \ the meta compiler.  during meta-interpretation, transition is not
+  \ searched.  during meta-compilation, transition is searched before
+  \ the target vocabulary.  if a word is found in transition, it is
+  \ executed as an immediate
+
+\ define a word in the transition vocabulary
+: T:    SWITCH   TRANSITION DEFINITIONS            :  SWITCH ;
+
+\ terminate a transition definition, included for syntax
+: T;    SWITCH   TRANSITION DEFINITIONS  POSTPONE ;  SWITCH ; IMMEDIATE
+
+\ -----
+
+: EQU
+   DUP 2 BREAK-LINE
+   CONSTANT ;
+
+: IMMEDIATE
+   IMMEDIATE ( using the host immediate, make the host header immediate)
+   LAST-T @ THERE C@ ( LEXICON BYTE OF MOST RECENT HEADER)
+   $40 OR
+   LAST-T @ THERE C! ;
+
+: IMMEDIATE/COMPILE-ONLY
+   IMMEDIATE/COMPILE-ONLY ( using the host immediate/compile-only, ...)
+   LAST-T @ THERE C@ ( LEXICON BYTE OF MOST RECENT HEADER)
+   $60 OR
+   LAST-T @ THERE C! ;
+
+: COMPILE-ONLY
+   COMPILE-ONLY ( using the host compile-only, ...)
+   LAST-T @ THERE C@ ( LEXICON BYTE OF MOST RECENT HEADER)
+   $20 OR
+   LAST-T @ THERE C! ;
+
+: NO-EXPAND
+   $80 MAC-T @ C!-T
+   0 MAC-H @ ! ;
+
+\ ----- Interpretive words for Meta
+
+\ Save a version of old : for later.  Will be redefined.
+: H:  :   ;
+
+\ How <xxx> should behave during Target Compilation.
+
+H: '            'T >BODY @   ;
+H: ,            ,-T ;
+H: C,           C,-T ;
+H: HERE         HERE-T ;
+H: ALLOT        ALLOT-T   ;
+H: ,"           [ CHAR " ] LITERAL WORD COUNT S,-T ;
+
+\ ----- meta compiler literals
+
+: LITERAL-T ( n)
+   " CELL " EVALUATE  HERE-T 6 - !-T ;
+
+T: LITERAL ( n)
+   LITERAL-T T;
+
+T: [']   'T >BODY @ LITERAL-T T;
+
+
+T: "
+   " _quote " EVALUATE 34 WORD COUNT S,-T T;
+
+
+T: ."           \ compile a printing string
+   " _quote " EVALUATE 34 WORD COUNT S,-T
+   " TYPE " EVALUATE T;
+
+T: ABORT"
+   " IF _quote " EVALUATE 34 WORD COUNT S,-T
+   " ERR THEN " EVALUATE T;
+
+T: [CHAR]
+   BL WORD 1+ C@ LITERAL-T T;
+
+T: POSTPONE
+   DE-FINED
+   0< IF    >BODY @ LITERAL-T " CALL" EVALUATE
+      ELSE  EXECUTE
+      THEN T;
+
+
+\ ----- colon compiler
+ \
+  \ Target compiler loop.  Search TRANSITION before TARGET for immediate
+  \ words.  If word is found, execute it (it must compile itself).  If word
+  \ is not found, convert it to a number or make a forward reference. If at
+  \ the end of line, read another line from the current file.
+
+\ stop compiling and reset search path
+T: [
+   IN-META   META-STATE OFF T;
+
+\ the meta-compiler
+
+H: ]
+   IN-TRANSITION
+   META-STATE ON
+   BEGIN
+      BEGIN
+         BL WORD  DUP C@
+      WHILE
+         FIND
+         IF     EXECUTE
+         ELSE   DUP>R COUNT VAL?
+                DUP 0= IF R> COUNT TYPE PANIC THEN
+                R>DROP
+                2 = IF SWAP LITERAL-T THEN LITERAL-T
+         THEN
+         META-STATE @ 0=
+      UNTIL EXIT THEN DROP
+      REFILL NOT
+   UNTIL PANIC ;
+
+\ ----- COLON DEFINITIONS
+ \
+  \ colon definitions in the target are direct threaded entities
+  \ with a eight byte code field (for alignment speed).  the code
+  \ field consists of a call to the doLIST routine, which results
+  \ in the list body address being pushed onto the data stack as
+  \ the call's return address.  very handy...
+
+H: x,CALL-T ( ta)
+   $E8 C,-T  HERE-T 4 + - ,-T ;
+
+H: EVAL-T ( a #)
+   SWITCH  TARGET  EVALUATE  SWITCH ;
+
+H: CORE ;
+
+H: :
+   TARGET-CREATE ]  ;
+
+T: ;
+   NEW-LINE $C3 ,OP-T  [TRANSITION] [  [META]   T;
+
+H: CREATE
+   RECREATE
+   " DOVAR " EVAL-T ,CALL-T
+   HERE-T CONSTANT ;
+
+\ -----
+
+H: VARIABLE
+   CREATE  0 ,-T ;
+
+H: CONSTANT
+   RECREATE
+   " DOCON " EVAL-T ,CALL-T  DUP ,-T
+   CONSTANT ;
+
+H: USER ( n)
+   TARGET-CREATE
+   " DOUSER " EVAL-T ,CALL-T  ( n) ,-T ;
+
+H: DOSCALL ( ionum items "NAME" -- )
+   TARGET-CREATE
+   " DO_DOSAPI " EVAL-T ,CALL-T  SWAP 4 * ,-T  4 * ,-T ;
+
+
+H: DOS16CALL ( ionum items "NAME" -- )
+   TARGET-CREATE
+   " DO_DOS16API " EVAL-T ,CALL-T  SWAP 4 * ,-T  4 * ,-T ;
+
+
+H: DS ( n -- )
+   TARGET-CREATE
+   " DODS " EVAL-T ,CALL-T  DS-T @ ,-T  ( n) DS-T +! ;
+
+H: CHAR    BL WORD 1+ C@ ;
+H: CTRL    BL WORD 1+ C@ $1F AND ;
+
+
+\ ----- Meta Compiler Branching Words
+
+\ These are the META versions of the structured conditionals found in
+\ FORTH.  They must compile the correct run time branch instruction, and
+\ then Mark and Resolve either forward or backward branches.  These are
+\ very analogous to the regular conditionals in Forth.  Since they are in
+\ the TRANSITION vocabulary, which is searched before the TARGET
+\ vocabulary, they will be executed instead of the TARGET versions of
+\ these words which are defined much later.
+
+T: BEGIN        " _BEGIN" EVAL-T  <MARK      T;
+T: AGAIN        " _AGAIN" EVAL-T  <RESOLVE   T;
+T: UNTIL        " _IF   " EVAL-T  <RESOLVE   T;
+
+T: IF           " _IF   " EVAL-T  >MARK      T;
+T: AHEAD        " _AGAIN" EVAL-T  >MARK      T;
+T: THEN         " _BEGIN" EVAL-T  >RESOLVE   T;
+T: ELSE         [TRANSITION] AHEAD SWAP THEN [META] T;
+
+T: WHILE        [TRANSITION] IF  SWAP        [META] T;
+T: REPEAT       [TRANSITION] AGAIN  THEN     [META] T;
+
+T: DO           " _DO _BEGIN"    EVAL-T  <MARK     T;
+T: LOOP         " _LOOP "  EVAL-T  <RESOLVE  T;
+T: +LOOP        " _+LOOP " EVAL-T  <RESOLVE  T;
+
+T: EXIT         $C3 ,OP-T  T;
+
+T: CASE 0 T;
+\ 0 CONSTANT CASE
+
+T: OF
+   1 + >R
+   " OVER =" EVAL-T
+   " _IF" EVAL-T >MARK " DROP" EVAL-T
+   R>  T;
+
+T: ENDOF
+   >R [TRANSITION] ELSE [META] R>  T;
+
+T: ENDCASE
+   " DROP" EVAL-T
+   ?DUP
+   IF
+      0 DO
+         " _BEGIN" EVAL-T >RESOLVE
+      LOOP
+   THEN  T;
+
+
+\ Inherit words from host
+
+T: (    POSTPONE (    T;
+T: \    POSTPONE \    T;
+
+\ -----
+
+CAPS ON
+
+CR CR .( kernel... )
+
+\ compile the kernel
+0 VIEW-T !  INCLUDE FORTH.4
+
+$ENDLIST
+
+SAVE-TARGET NEW.X
+
+
+CR
+CR .( Image saved as NEW.X)
+CR
+

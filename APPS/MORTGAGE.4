@@ -1,0 +1,36 @@
+\ simple amortization formula
+\ -----
+
+\ 10000.00 dollars for 12 months at 8.5 percent costs
+
+floating
+
+fvariable interest
+fvariable period
+fvariable amount
+
+: for ;
+: at ;
+
+: dollars ( amount.fp -- )     amount f! ;
+: percent ( interest.fp -- )   100.0 f/ 12.0 f/ interest f! ;
+
+: months ( months -- )    s>f period f! ;
+: years ( years -- )   12 * months ;
+   
+
+: 1/f ( f -- 1/f )
+   1.0 fswap f/ ;
+
+: money. ( float -- )
+   100.0 f* f>d
+   <# # # [char] . hold #s #> type space ;
+   
+: costs
+   1.0 interest f@ f+  period f@ f**  1/f  fnegate 1.0 f+
+   interest f@ fswap f/  amount f@ f* 
+   money. ." per month " ;
+
+15000.0 dollars at 8.5 percent for 10 years costs   
+   
+   

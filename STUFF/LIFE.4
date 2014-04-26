@@ -1,0 +1,83 @@
+\ simple game of life
+
+64 constant cols                        \ x size of the world
+16 constant rows                        \ y size of world
+
+cols rows * constant pixels             \ size of world in bytes
+
+create the_old  pixels allot            \ the current world
+create the_new  pixels allot            \ the next generation
+
+: wipe  the_old pixels erase ;          \ clear the current world
+: copy  the_new the_old pixels cmove ;  \ move new to old
+
+: in ( x y array -- address )           \ index the given array
+   -rot  15 and ( rows mod) cols *  swap  63 and ( cols mod)  +  ( a off) + ;
+
+\ -----
+
+: show ( array -- )                     \ the_old show   the_new show
+   0 0 at                               \ top corner
+   rows 0 do
+      cols 0 do
+         ( array) dup i j rot in c@     \ array pixel
+         if [char] * else bl then       \ alive is * dead is bl
+         emit
+      loop
+      cr
+   loop drop ;
+
+: live ( x y -- )   the_old in  1 swap c! ;
+: born ( x y -- )   the_new in  1 swap c! ;
+: dies ( x y -- )   the_new in  0 swap c! ;
+
+: glider wipe  6 4 live  7 4 live  8 4 live  8 3 live  7 2 live ;
+
+\ -----
+
+: v+ ( x1 y1 x2 y2 -- x3 y3 )
+   >r swap >r +  r> r> + ;
+
+: sumit ( x y -- sum )
+   0                            \ x y sum
+   2 -1 do ( y)
+      2 -1 do ( x)
+         -rot  2dup             \ sum x y x y
+         i j v+                 \ sum x y x' y'
+         the_old in c@          \ sum x y b
+         >r rot r> +            \ x y sum'
+      loop                      \
+   loop                         \ x y sum
+   -rot 2drop ;                 \ sum
+
+\ -----
+
+: procreate ( x y -- next )
+   2dup the_old in c@ >r                \ x y           \r state
+   sumit r>                             \ sum state
+   if ( alive)
+      3 4 between
+   else ( dead)
+      3 =
+   then ;
+
+\ -----
+
+: cycle
+   rows 0 do
+      cols 0 do
+         i j procreate if i j born else i j dies then
+      loop
+   loop ;
+
+
+
+
+
+
+
+
+
+
+
+

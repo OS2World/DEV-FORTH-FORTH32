@@ -1,0 +1,96 @@
+\ tools
+\ -----
+
+: 2variable   create 0 , 0 , ;
+
+: under+ ( n1 n2 n3 -- n1+n3 n2 )
+   rot + swap ;
+
+: array ( n "name" -- )
+   create cells allot
+   does> swap cells + ;
+
+: 2array ( x y "name" -- )
+   create  over cells ,  * cells allot
+   does> ( x y base -- addr )
+      dup cell+ >r               \ x y base        \ start
+      @ *                        \ x yoff          \ start
+      swap cells +               \ xyoff           \ start
+      r> + ;                     \ addr
+
+\ 3d array with bounds check
+\ -----
+
+: @+ ( addr -- n addr+cell )
+   dup @ swap cell+ ;
+
+: 3@ ( addr -- [addr+2] [addr+1] [addr+0] )
+   @+ @+ @ swap rot ;
+
+: 3dup ( n1 n2 n3 -- n1 n2 n3 n1 n2 n3 )
+   2 pick 2 pick 2 pick ;
+
+\ z varies the fastest, y next, and x is slowest
+
+: twist ( a1 b1 c1 a2 b2 c2 -- a1 a2 b1 b2 c1 c2 )
+   >r >r -rot r> swap r> ;
+
+: 3d_index ( x x# y y# z z# -- offset )
+   tuck mod >r >r       \ x x# y y#       \r zoff z#
+   tuck mod >r >r       \ x x#            \r zoff z# yoff y#
+        mod             \ xn              \r zoff z# yoff y#
+        r> *            \ xoff            \r zoff z# yoff
+        r> +            \ xoff+yn         \r zoff z#
+        r> *            \ xyoff           \r zoff
+        r> + ;          \ xyzoff
+
+: xyz>offset ( x y z addr -- offset )
+   3@ twist 3d_index cells ;
+
+: 3array ( x y z "name" -- )
+   create
+      3dup , , ,  * * cells allot
+   does> ( x y z addr)
+      dup  3 cells + >r  xyz>offset  r> + ;
+
+\ neural math (scaled integers)
+\ -----
+
+      1000 constant one
+1000000000 constant huge
+
+: n+ ( n n -- n )   + ;
+: n- ( n n -- n )   - ;
+: n* ( n n -- n )   one */ ;
+: n/ ( n n -- n )   one swap */ ;
+
+: n+! ( n addr -- )    +! ;
+
+: (n.) ( n -- addr # )
+   s>d <# # # # [char] . hold #s #> ;
+
+: n. ( n -- )
+   (n.) type space ;
+
+: n.r ( n f -- )
+   >R  (n.)  R> OVER - 0 MAX SPACES  TYPE ;
+
+: n.r_blaze ( n f -- )
+   >R  (n.)  R> OVER - 0 MAX SPACES  BLAZE ;
+
+: s>n ( i -- n )   one * ;
+
+
+\ misc
+\ -----
+
+: nuf
+   key 27 = if quit then ;
+
+: break?
+   key? if
+      nuf cr ." esc to break" nuf
+   then ;
+
+
+

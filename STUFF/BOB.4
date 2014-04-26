@@ -1,0 +1,114 @@
+\ bob illyes' self organizing map
+\ -----
+
+EMPTY
+INCLUDE RND.4
+INCLUDE VGA.4
+
+1440 CONSTANT POINTS        \ number of x,y pairs in the map
+
+POINTS ALLOT  ALIGN  HERE POINTS 2* CELLS ALLOT  HERE POINTS ALLOT
+
+CONSTANT END   CONSTANT MAP   \ start and end of map
+VARIABLE XIN   VARIABLE YIN   \ input x and y
+CREATE SIZE  16 ,             \ lateral extent of learning
+VARIABLE BEST                 \ address of nearest x,y
+VARIABLE SEEDS                \ random number generator seed
+
+: SEED   POINTS 2* 0 DO  180 RND  I CELLS MAP + !  LOOP ;
+
+\ MAP ADDRESSING.  RETURN THE X,Y VALUE OF THE NTH MAP CELL
+\ -----
+: XY     ( n -- x y )
+   2*  CELLS  MAP +  DUP @  SWAP CELL+ @ ;
+
+
+
+\ SHOW THE CURRENT MAP
+\ -----
+: SEE
+   VGA   0 XY SET   POINTS 1 DO  I XY LINE  LOOP  ;
+
+
+
+\ HOW FAR FROM THE X,Y AT THE CELL TO THE BEST FIT
+\ -----
+: DISTANCE ( addr -- dist-sq )   DUP         @  XIN @ -  DUP *
+                                 SWAP CELL+  @  YIN @ -  DUP *  + ;
+
+
+
+\ LOOK FOR THE CLOSEST FIT TO XY IN THE CELL ARRAY
+\ -----
+: SCAN ( x y -- )
+   YIN !  XIN !         \                 \ save current vector
+   -1 MAP BEGIN         \ min_d 'cell     \ point to start, dist=+inf
+      DUP >R            \ min_d 'cell     \ save cell on return stack
+      DISTANCE          \ min_d new_d     \ distance from this cell to vector
+      2DUP SWAP U< IF   \ min_d new_d     \ if this dist is less than prev dist
+         R@ BEST !      \ min_d new_d     \ mark this as best
+         SWAP           \ new_d min_d     \ swap for drop to discard old min_d
+      THEN              \ min_d non_d     \
+      DROP              \ min_d           \ discard non-min d
+      R> 2 CELLS +
+      DUP END =         \ min_d 'cell'    \ advance to next cell
+   UNTIL 2DROP ;
+
+
+
+\ CALCULATE THE ADDRESS OF CELL (BEST + N )
+\ -----
+: LATERAL ( offset -- addr )
+   2 CELLS * BEST @ + ;
+
+
+
+\ ADJUST THE CELL AT THE MAP ADDRESS
+\ -----
+\ : PULL ( 'map 'in i -- )
+\    >R                      \ 'map 'in
+\    @ OVER @                \ 'map ['in] ['map]
+\    -                       \ 'map err
+\    SIZE @                  \ 'map err siz
+\    R> ABS 20 *             \ 'map err siz a*dist
+\    SIZE @ 2*               \ 'map err siz a*dist b*siz
+\    MAX                     \ 'map err siz clip
+\    */                      \ 'map adj
+\    SWAP +! ;               \
+
+: PULL ( input_addr map_addr i -- )   >R
+   @ OVER @ - SIZE @
+   R> ABS 20 *  SIZE @ 2*  MAX  */  SWAP +! ;
+
+
+
+\ TEACH THE NET ABOUT THE BEST FIT
+\ -----
+: LEARN
+   SIZE @ 1+  SIZE @ NEGATE  DO
+      I LATERAL  DUP XIN I PULL  CELL+ YIN I PULL
+   LOOP ;
+
+
+
+\ RUN THE LEARNING LOOP N TIMES WITH RNDOM DATA
+\ -----
+: RUN ( n -- )
+   0 DO
+      180 RND 180 RND SCAN LEARN
+   LOOP  SEE ;
+
+
+
+\ RUN THE NET UNTIL THE LATERAL EXTENT BECOMES ZERO
+\ -----
+: TEST
+   SEED SEE  POINTS 2 CELLS /
+   BEGIN
+      KEY? IF TEXT EXIT THEN
+      DUP SIZE !  1000 RUN  3 4 */  DUP 0=
+   UNTIL  DROP ;
+
+
+
+

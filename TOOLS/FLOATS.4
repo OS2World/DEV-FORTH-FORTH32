@@ -1,0 +1,867 @@
+\
+\ floating point routines using the co-processor
+\ the format of the floating-point values is ieee 754 double real (64 bit)
+\ =>  significant digits : 15 - 16
+\     approximate range  : 2.23 * 10^(-308) <= |x| <= 1.8 * 10^(308)
+\
+
+\ -----
+\ floating-point stack manipulations words
+
+: FDUP  2DUP  ;
+: FDROP 2DROP ;
+: FSWAP 2SWAP ;
+: FROT  2ROT  ;
+: FOVER 2OVER ;
+: F!    2!    ;
+: F@    2@    ;
+
+\ ----- 
+\ co-processor contol words to set the round-control bits
+
+CREATE ROUND_NEAR  $037F ,              \ round to nearest
+CREATE ROUND_DOWN  $077F ,              \ round down, -> -infinity
+CREATE ROUND_TRUNC $0F7F ,              \ round to zero, truncate
+
+\ -----
+\ simple opcodes for floating point operations
+
+\ processor control
+: _FINIT       $9B C, $DB C, $E3 C, ;   \ init co-processor
+
+\ set rounding control bits in control-word
+: _FLDCW_NEAR  $9B C, $D9 C, $2D C, ROUND_NEAR  , ;   \ round to nearest
+: _FLDCW_DOWN  $9B C, $D9 C, $2D C, ROUND_DOWN  , ;   \ round down, -> -inf.
+: _FLDCW_TRUNC $9B C, $D9 C, $2D C, ROUND_TRUNC , ;   \ round to zero, truncate
+
+\ data transfer
+: _FLD(ST0)    $9B C, $D9 C, $C0 C, ;   \ copy tos:     ST0  -> ST1
+: _FLD         $9B C, $DD C, $07 C, ;   \ double real:  [SI] -> ST0
+: _FLD32       $9B C, $D9 C, $07 C, ;   \ single real:  [SI] -> ST0
+: _FILD        $9B C, $DF C, $2F C, ;   \ long integer: [SI] -> ST0
+: _FILD32      $9B C, $DB C, $07 C, ;   \ integer:      [SI] -> ST0
+: _FST         $9B C, $DD C, $17 C, ;   \ double real:  ST0  -> [SI]
+: _FSTP        $9B C, $DD C, $1F C, ;   \ double real:  ST0  -> [SI], pop ST0
+: _FSTP32      $9B C, $D9 C, $1F C, ;   \ single real:  ST0  -> [SI], pop ST0
+: _FISTP       $9B C, $DF C, $3F C, ;   \ long integer: ST0  -> [SI], pop ST0
+: _FISTP32     $9B C, $DB C, $1F C, ;   \ integer:      ST0  -> [SI], pop ST0
+: _FXCH1       $9B C, $D9 C, $C9 C, ;   \ exchange:     ST0 <-> ST1
+
+\ constants
+: _FLD1        $9B C, $D9 C, $E8 C, ;   \ 1.0      -> ST
+: _FLDL2T      $9B C, $D9 C, $E9 C, ;   \ log2(10) -> ST
+: _FLDL2E      $9B C, $D9 C, $EA C, ;   \ log2(e)  -> ST
+: _FLDPI       $9B C, $D9 C, $EB C, ;   \ 3.1415.. -> ST
+
+\ arithmetics
+: _FADDP       $9B C, $DE C, $C1 C, ;   \ ST0 + ST1 -> ST1, pop ST0
+: _FSUB        $9B C, $D8 C, $E1 C, ;   \ ST1 - ST0 -> ST1
+: _FSUBR       $9B C, $D8 C, $E9 C, ;   \ ST0 - ST1 -> ST1
+: _FSUBP       $9B C, $DE C, $E9 C, ;   \ ST1 - ST0 -> ST1, pop ST0
+: _FSUBRP      $9B C, $DE C, $E1 C, ;   \ ST0 - ST1 -> ST1, pop ST0
+: _FMULP       $9B C, $DE C, $C9 C, ;   \ ST0 * ST1 -> ST1, pop ST0
+: _FDIVP       $9B C, $DE C, $F9 C, ;   \ ST1 / ST0 -> ST1, pop ST0
+: _FDIVRP      $9B C, $DE C, $F1 C, ;   \ ST0 / ST1 -> ST1, pop ST0
+: _FCHS        $9B C, $D9 C, $E0 C, ;   \ 0 - ST0   -> ST0
+: _FABS        $9B C, $D9 C, $E1 C, ;   \ |ST0|     -> ST0
+: _FSQRT       $9B C, $D9 C, $FA C, ;   \ sqrt(ST0) -> ST0
+: _FRNDINT     $9B C, $D9 C, $FC C, ;   \ int(ST0)  -> ST0
+: _FSCALE      $9B C, $D9 C, $FD C, ;   \ ST0 * 2^(int(ST1)) -> ST0
+
+\ transcendental
+: _FCOS        $9B C, $D9 C, $FF C, ;   \ cos(ST0) -> ST0
+: _FSIN        $9B C, $D9 C, $FE C, ;   \ sin(ST0) -> ST0
+: _FSINCOS     $9B C, $D9 C, $FB C, ;   \ sin(ST0) -> ST0, push cos(ST0)
+: _FPTAN       $9B C, $D9 C, $F2 C, ;   \ tan(ST0) -> ST0, push 1.0
+: _FPATAN      $9B C, $D9 C, $F3 C, ;   \ arctan(ST1/ST0) -> ST1, pop ST0
+: _F2XM1       $9B C, $D9 C, $F0 C, ;   \ 2^(ST0) - 1 -> ST0
+: _FYL2X       $9B C, $D9 C, $F1 C, ;   \ ST1 * log2(ST0) -> ST0
+
+\ -----
+
+CODE FINIT
+            _FINIT
+   END-CODE
+   NO-EXPAND
+
+\ -----
+\ conversion words: D>F S>F F>D F>S
+
+\ float is the floating-point equivalent of d.
+CODE D>F ( d -- float )
+         CX POP
+         BX PUSH
+         CX PUSH
+      SP DI MOV
+            _FILD                       \ load long integer (64-bit)
+            _FSTP                       \ pop double real (64-bit)
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float is the floating-point equivalent of n.
+CODE S>F ( n -- float )
+         BX PUSH
+      SP DI MOV
+            _FILD32                     \ load integer (32-bit)
+     4 # DI SUB
+      DI SP MOV
+            _FSTP                       \ pop double real (64-bit)
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ d is the double-cell signed-integer equivalent of the integer portion
+\ of float. the fractional portion of float is discarded.
+CODE F>D ( float -- d )
+         BX PUSH
+      SP DI MOV
+            _FLD                        \ load 64-bit real
+            _FLDCW_TRUNC                \ set rounding control to truncate
+            _FISTP                      \ pop a long integer (double) result
+            _FLDCW_NEAR                 \ set rounding control back to nearest
+         CX POP
+         BX POP
+         CX PUSH
+   END-CODE
+   NO-EXPAND
+
+\ n is the single-cell signed-integer equivalent of the integer portion
+\ of float. the fractional portion of float is discarded.
+CODE F>S ( float -- n )
+         BX PUSH
+      SP DI MOV
+            _FLD                        \ load 64-bit real
+            _FLDCW_TRUNC                \ set rounding control to truncate
+     4 # DI ADD
+      DI SP MOV
+            _FISTP32                    \ pop a integer (32-bit) result
+            _FLDCW_NEAR                 \ set rounding control back to nearest
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ -----
+\ conversion routines: single real (32-bit) <-> double real (64-bit)
+
+\ convert double real (64-bit) floating-point to single real (32-bit)
+CODE DF>SF ( float64 -- float32 )
+         BX PUSH
+      SP DI MOV
+            _FLD                        \ load double real (64-bit)
+     4 # DI ADD
+      DI SP MOV
+            _FSTP32                     \ pop single real (32-bit)
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ convert single real (32-bit) floating-point to double real (64-bit)
+CODE SF>DF ( float32 -- float64 )
+         BX PUSH
+      SP DI MOV
+            _FLD32                      \ load single real (32-bit)
+     4 # DI SUB
+      DI SP MOV
+            _FSTP                       \ pop double real (64-bit)
+         BX POP
+   END-CODE 
+   NO-EXPAND
+
+\ -----
+\ arithmetics
+
+\ float2 is the negation of float1.
+CODE FNEGATE ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD                        \ load 64-bit real
+            _FCHS     
+            _FSTP                       \ pop 64-BIT REAL result
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ add float1 to float2, giving float3.
+CODE F+ ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FADDP
+            _FSTP
+     8 # SP ADD
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ subtract float2 from float1, giving float3.
+CODE F- ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FSUBRP
+            _FSTP
+     8 # SP ADD
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ multiply float1 by float2, giving float3
+CODE F* ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FMULP
+            _FSTP
+     8 # SP ADD
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ divide float1 by float2, giving the quotient float3. if float2 is zero
+\ the quotient will be +infinity or -infinity.
+CODE F/ ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FDIVRP
+            _FSTP
+     8 # SP ADD
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ round float1 to an integral value using the "round toward negative infinity"
+\ rule, giving float2
+CODE FLOOR ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLDCW_DOWN
+            _FRNDINT
+            _FLDCW_NEAR
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ round float1 to an integral value using the "round to nearest" rule,
+\ giving float2
+CODE FROUND ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FRNDINT
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the square root of float1. if float1 is less than zero the
+\ result will be a NaN (not a number).
+CODE FSQRT ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FSQRT
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the absolute value of float1.
+CODE FABS ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FABS
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the natural logarithm of float1. if float1 if less then or
+\ equal zero the result is a NaN
+CODE FLN ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD1
+            _FLDL2E
+            _FDIVP
+            _FLD
+            _FYL2X
+            _FSTP
+         BX POP
+            _FINIT                      \ clear the floating-point stack
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the natural logarithm of (float1 + 1.0) . if float1 if less then
+\ or equal negative 1 the result is a NaN
+: FLNP1 ( float1 -- float2 )
+   FLN 1 S>F F+ ;
+
+\ float2 is the base-ten logarithm of float1. if float1 if less then or
+\ equal zero the result is a NaN
+CODE FLOG ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD1
+            _FLDL2T
+            _FDIVP
+            _FLD
+            _FYL2X
+            _FSTP
+         BX POP
+            _FINIT                      \ clear the floating-point stack
+   END-CODE
+   NO-EXPAND
+
+\ raise float1 to the power float2, giving the product float3. if float1
+\ is less than zero the result will be a NaN.
+CODE F** ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FYL2X
+            _FLD(ST0)
+            _FLDCW_TRUNC
+            _FRNDINT
+            _FLDCW_NEAR
+            _FSUBR
+            _F2XM1
+            _FLD1
+            _FADDP
+            _FSCALE
+            _FSTP
+     8 # SP ADD
+         BX POP
+            _FINIT                      \ clear the floating-point stack
+   END-CODE
+   NO-EXPAND
+
+\ raise e to the power float1, giving float2.
+CODE FEXP ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLDL2E
+            _FMULP
+            _FLD(ST0)
+            _FLDCW_TRUNC
+            _FRNDINT
+            _FLDCW_NEAR
+            _FSUBR
+            _F2XM1
+            _FLD1
+            _FADDP
+            _FSCALE
+            _FSTP
+         BX POP
+            _FINIT                      \ clear the floating-point stack
+   END-CODE
+   NO-EXPAND
+
+\ raise e to the power float1 and subtract one, giving float2.
+: FEXPM1 ( float1 -- float2 )
+   FEXP 1 S>F F- ;
+
+\ raise ten to the power of float1, giving float2.
+CODE FALOG ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLDL2T
+            _FMULP
+            _FLD(ST0)
+            _FLDCW_TRUNC
+            _FRNDINT
+            _FLDCW_NEAR
+            _FSUBR
+            _F2XM1
+            _FLD1
+            _FADDP
+            _FSCALE
+            _FSTP
+         BX POP
+            _FINIT                      \ clear the floating-point stack
+   END-CODE
+   NO-EXPAND
+
+\ -----
+\ trigonometric functions
+
+\ float2 is the sine of the radian angle float1.
+CODE FSIN ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FSIN
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the cosine of the radian angle float1.
+CODE FCOS ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FCOS
+            _FSTP
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the sine of the radian angle float1. float3 is the cosine of
+\ the radian angle float1.
+CODE FSINCOS ( float1 -- float2 float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FSINCOS
+            _FXCH1
+            _FSTP
+     8 # DI SUB
+            _FSTP
+     8 # SP SUB
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the tangent of the radian angle float1.
+CODE FTAN ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FPTAN
+            _FSTP                       \ pop 1.0 (not needed)
+            _FSTP                       \ pop result
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the principle radian angle whose tangent is float1.
+CODE FATAN ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLD1                       \ push 1.0
+            _FPATAN
+            _FSTP                       \ pop result
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float3 is the radian angle whose tangent is (float1 / float2).
+CODE FATAN2 ( float1 float2 -- float3 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+     8 # DI ADD
+            _FLD
+            _FXCH1
+            _FPATAN
+            _FSTP
+     8 # SP ADD
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the principle radian angle whose sine is float1.
+CODE FASIN ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLD(ST0)
+            _FLD(ST0)
+            _FMULP
+            _FLD1
+            _FSUBRP
+            _FSQRT
+            _FPATAN
+            _FSTP                       \ pop result
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 is the principle radian angle whose cosine is float1.
+CODE FACOS ( float1 -- float2 )
+         BX PUSH
+      SP DI MOV
+            _FLD
+            _FLD(ST0)
+            _FLD(ST0)
+            _FMULP
+            _FLD1
+            _FSUBRP
+            _FSQRT
+            _FPATAN
+            _FLDPI
+            _FLD1
+            _FLD1
+            _FADDP
+            _FDIVP
+            _FSUBRP
+            _FSTP                       \ pop result
+         BX POP
+   END-CODE
+   NO-EXPAND
+
+\ float2 = e^(float1), float3 = e^(-float1)
+: HYPER ( float1 -- float2 float3 )
+   FDUP FEXP FSWAP FNEGATE FEXP ;
+
+\ float2 is the hyperbolic sine of float1.
+: FSINH ( float1 -- float2 )
+   HYPER F-
+   2 S>F F/ ;
+
+\ float2 is the hyperbolic cosine of float1.
+: FCOSH ( float1 -- float2 )
+   HYPER F+
+   2 S>F F/ ;
+
+\ float2 is the hyperbolic tangent of float1.
+: FTANH ( float1 -- float2 )
+   FDUP FSINH FSWAP FCOSH F/ ;
+
+\ float2 is the value whose hyperbolic sine is float1.
+: FASINH ( float1 -- float2 )
+   FDUP
+   FDUP F* 1 S>F F+ FSQRT
+   F+ FLN ;
+
+\ float2 is the value whose hyperbolic cosine is float1.
+: FACOSH ( float1 -- float2 )
+   FDUP
+   FDUP F* 1 S>F F- FSQRT
+   F+ FLN ;
+
+\ float2 is the value whose hyperbolic tangent is float1.
+: FATANH ( float1 -- float2 )
+   FDUP  1 S>F F+
+   FSWAP 1 S>F F- FNEGATE
+   F/ FLN 2 S>F F/ ;
+
+\ -----
+\ floating-point compares
+
+( float -- flag )
+: F0<   DROP 0<    ;
+: F0=   DROP 0=    ;
+: F0>   DROP DUP 0< SWAP 0= OR 0= ;     \ 0> = NOT ( 0< OR 0= )
+: F0<>  DROP 0<>   ;
+
+( float1 float2 -- flag )
+: F=    F- F0=  ;
+: F<    F- F0<  ;
+: F>    F- F0>  ;
+: F<>   F= 0=   ;
+: F<=   F> 0=   ;
+: F>=   F< 0=   ;
+
+: FMAX ( float1 float2 -- float1 | float2 )
+   FOVER FOVER F<
+   IF  FSWAP  THEN
+   FDROP  ;
+
+: FMIN ( float1 float2 -- float1 | float2 )
+   FOVER FOVER F>
+   IF  FSWAP  THEN
+   FDROP  ;
+
+\ if float3 is positive, flag is true if the absolute value of
+\ (float1 - float2) is less than float3.
+\ if float3 is zero, flag is true if float1 and float2 are exactly identical.
+\ if float3 is negative, flag is true if the absolute value of
+\ (float1 - float2) is less than the absolute value of float3 times the sum
+\ of the absolute values of float1 and float2.
+: F~ ( float1 float2 float3 -- flag )
+   FDUP F0> IF
+      FROT FROT F- FABS FSWAP F< EXIT   \ if      float3 is positive
+   THEN
+   FDUP F0= IF
+      FDROP F= EXIT                     \ else if float3 is zero
+   THEN                                 \ else if float3 is negative
+   FABS 2>R                             \ save fabs(float3)
+   FDUP FABS 2>R                        \ save fabs(float2)
+   FOVER FABS 2>R                       \ save fabs(float1)
+   FSWAP F- FABS                        \ calc. fabs(f1-f2)
+   2R> 2R> F+ 2R> F*                    \ calc. (fabs(f1)+fabs(f2))*fabs(f3)
+   F< ;                                 \ set flag
+
+\ -----
+
+\ create a floating-point variable
+: FVARIABLE ( "name" -- ) CREATE 0 , 0 , ;
+
+\ create a floating-point constant called "name" whose value at execution is f
+: FCONSTANT ( f "name" -- )
+   CREATE , , DOES> 2@ ;
+
+\ compile a literal, floating-point (64 bit)
+: FLITERAL ( float -- )
+   SWAP
+   POSTPONE LITERAL
+   POSTPONE LITERAL ; IMMEDIATE/COMPILE-ONLY
+
+\ -----
+
+: FLOATS ( n1 -- n2 )
+   8 * ;
+
+: FLOAT+ ( f-addr1 -- f-addr2 )
+   1 FLOATS + ;
+
+: FDEPTH ( -- +n )
+   DEPTH 2/ ;
+
+: FALIGN   ; ( -- )
+: FALIGNED ; ( addr -- f-addr )
+
+\ -----
+\ double real (64-bit) IEEE floating-point
+
+: DF!       2! ;
+: DF@       2@ ;
+: DFALIGN   ;
+: DFALIGNED ;
+: DFLOATS   8 * ;
+: DFLOAT+   1 DFLOATS + ;
+
+\ -----
+\ single real (32-bit) IEEE floating-point
+
+: SF!       ! ;
+: SF@       @ ;
+: SFALIGN   ;
+: SFALIGNED ;
+: SFLOATS   4 * ;
+: SFLOAT+   1 SFLOATS + ;
+
+\ -----
+\ precision for the output routines
+\ the variable "SIGNIFICANT_DIGITS" is a user-variable
+
+: PRECISION ( -- u )
+   SIGNIFICANT_DIGITS @ ;
+
+: SET-PRECISION ( u -- )
+   SIGNIFICANT_DIGITS ! ;
+
+\ -----
+\ state-machine to check a string for a valid floating-point number
+
+: SKIP_+ ( addr -- addr' )
+   DUP C@ [CHAR] + = IF 1+ THEN ;
+
+: SKIP_- ( addr -- addr' )
+   DUP C@ [CHAR] - = IF 1+ THEN ;
+
+: SKIP_DP ( addr -- addr' )
+   DUP C@ [CHAR] . = IF 1+ THEN ;
+
+: DIGIT? ( char -- flag )
+   48 58 WITHIN ;
+
+: SKIP_DIGITS ( addr -- addr' )
+   BEGIN
+      DUP C@ DIGIT?
+      IF 1+ FALSE ELSE TRUE THEN
+   UNTIL ;
+
+: dDeE? ( char -- flag )
+   95 AND                       \ uppercase
+   DUP [CHAR] D = SWAP [CHAR] E = OR ;
+
+VARIABLE D/E_POS
+
+: SKIP_EXPONENT ( addr -- addr' )
+   DUP C@ dDeE?  IF DUP D/E_POS ! 1+ ELSE 0 D/E_POS ! EXIT THEN
+   SKIP_+ SKIP_-
+   DUP C@ DIGIT? IF 1+ ELSE EXIT THEN
+   DUP C@ DIGIT? IF 1+ ELSE EXIT THEN
+   DUP C@ DIGIT? IF 1+ ELSE EXIT THEN ;
+
+\ check the string for floating-point number
+: FP#? ( addr u -- flag )
+   2DUP + -ROT DROP
+   SKIP_+ SKIP_- SKIP_DIGITS SKIP_DP SKIP_DIGITS SKIP_EXPONENT
+   = ;
+
+\ -----
+\ string to floating-point number conversion routines
+
+\ given a double integer and a decimal point location, convert to float64
+: D(DPL)>F ( double dpl -- float )
+   S>F FALOG FROUND FSWAP D>F FSWAP F/ ;
+
+: >FLOAT ( addr u -- float64 true | false )
+   2DUP _VAL? DUP 1 = IF 2DROP 2DROP FALSE EXIT THEN    \ integer -> exit
+                  2 = IF 2SWAP 2DROP DPL @ D(DPL)>F TRUE EXIT THEN
+   2DUP FP#? 0= IF 2DROP FALSE EXIT THEN
+   DROP D/E_POS @ OVER - _VAL? 1 = IF S>D 0 DPL ! THEN
+   DPL @ D(DPL)>F
+   D/E_POS @ 1+ SKIP_+
+   DUP SKIP_- SKIP_DIGITS OVER - _VAL? DROP S>F FALOG F* TRUE ;
+
+: _FLOAT_VAL? ( addr u -- float 2 | n 1 | 0 )
+   2DUP >FLOAT IF 2SWAP 2DROP 2 EXIT THEN       \ check for floating-point
+   _VAL? ;                                      \ check for double or single
+
+\ -----
+
+\ switch to floating-point input mode
+: FLOATING ( -- )
+   FINIT                                \ init the co-processor
+   14 SIGNIFICANT_DIGITS !              \ set the number of sign. digits
+   ['] _FLOAT_VAL? 'VAL? ! ;
+
+\ switch to non floating-point input mode
+: INTEGER ( -- )
+   ['] _VAL? 'VAL? ! ;
+
+FLOATING                                \ switch to floating-point input mode
+
+\ -----
+\ utility words for F. FS. FE.
+
+VARIABLE PAD_POINTER
+
+: PAD_COPY ( ADDR U -- )
+   DUP >R
+   PAD_POINTER @ SWAP CMOVE
+   R> PAD_POINTER +! ;
+
+: PAD_C! ( CHAR -- )
+   PAD_POINTER @ C!             \ store the character
+   1 PAD_POINTER +! ;           \ increment write-pointer
+
+: SKIP_ZEROS ( -- )
+   PAD_POINTER @ 1-
+   BEGIN
+      DUP C@ 48 = WHILE 1-
+   REPEAT
+   1+ PAD_POINTER ! ;
+
+: '_' 32 PAD_C! ;
+: '-' 45 PAD_C! ;
+: '.' 46 PAD_C! ;
+: '0' 48 PAD_C! ;
+: 'E' 69 PAD_C! ;
+
+\ -----
+\ floating-point output words: F. FS. FE. 
+
+: F_ADDR_U ( -- ADDR U )
+   PAD PAD_POINTER @ PAD - ;
+
+: X. ( FLOAT U -- )
+   >R F>D <# R> 0 ?DO # LOOP #>
+   PAD_COPY ;
+
+: .X ( FLOAT U -- )
+   DUP 0< IF DROP FDROP EXIT THEN
+   DUP >R S>F FALOG F*
+   FROUND F>D <# R> 0 ?DO # LOOP #>
+   PAD_COPY
+   SKIP_ZEROS ;
+
+: (FS.) ( FLOAT -- ADDR U )
+   FDUP F0=  IF '0' '.' 'E' '0' FDROP F_ADDR_U EXIT THEN
+   FDUP FLOG FLOOR FDUP F>S >R FNEGATE FALOG F*
+   FDUP 1 X.
+   '.'
+   PRECISION 1- .X
+   'E'
+   R> S>D (D.) PAD_COPY
+   F_ADDR_U ;
+
+: ENGINEERING_EXP ( n1 -- n2 )
+   DUP 3 MOD DUP 0< IF 3 + THEN - ;
+   
+: (FE.) ( FLOAT -- ADDR U )
+   FDUP F0=  IF '0' '.' 'E' '0' FDROP F_ADDR_U EXIT THEN
+   FDUP FLOG FLOOR F>S  ENGINEERING_EXP DUP >R S>F FNEGATE FALOG F*
+   FDUP FDUP FLOG F>S 1+ DUP >R X.
+   '.'
+   PRECISION R> - .X
+   'E'
+   R> S>D (D.) PAD_COPY
+   F_ADDR_U ;
+
+: F.INIT
+   PAD PAD_POINTER !
+   FDUP F0<  IF '-' FABS THEN ;
+
+: (F.) ( FLOAT -- ADDR U )
+   FDUP F0=  IF '0' '.' FDROP F_ADDR_U EXIT THEN
+   FDUP FLOG F>S ABS DUP 0< IF DROP $7FFFFFFF THEN 6 > IF (FS.) EXIT THEN
+   FDUP FLOG F0<
+   IF
+      '0' '.'
+      PRECISION
+   ELSE
+      FDUP FDUP FLOG FLOOR F>S 1+ DUP >R X.
+      '.'
+      PRECISION R> -
+   THEN
+   .X
+   F_ADDR_U ;
+
+: F.
+   F.INIT
+   (F.) TYPE SPACE ;
+
+: FS.
+   F.INIT
+   (FS.) TYPE SPACE ;
+
+: FE.
+   F.INIT
+   (FE.) TYPE SPACE ;
+
+\ -----
+\ REPRESENT
+
+: REPRESENT ( float addr u -- n flag1 flag2 )
+   SET-PRECISION                        \ u = precision
+   -ROT                                 \ get floating-point number
+   FDUP F0= IF                          \ if float = 0.0
+      FDROP                             \ drop float
+      PRECISION 48 FILL                 \ fill string with '0's
+      0 FALSE TRUE                      \ say: exponent=0, pos., true
+      EXIT                              \ exit
+   ( ELSE) THEN                         \ if float <> 0.0
+   FDUP F0< >R FABS                     \ save sign and force positive number
+   FDUP FLOG FLOOR 1.0 F+               \ calc. decimal-base exponent
+   FDUP F>S >R                          \ save exponent 
+   FNEGATE PRECISION S>F F+ FALOG       \ calc. 10^(precision-exp)
+   F* FROUND F>D                        \ calc. double integer
+   (D.) ROT SWAP CMOVE                  \ copy string to desired addr
+   R>                                   \ get exponent
+   R>                                   \ get sign-flag
+   TRUE ;                               \ always in range
+
+\ -----
+\ add the floating-point environmental queries
+
+ENVIRONMENT?-WORDS SET-CURRENT
+
+               TRUE  CONSTANT FLOATING       \ floating-point word set present
+               TRUE  CONSTANT FLOATING-EXT   \ fp-extensions present
+                  0  CONSTANT FLOATING-STACK \ fp-number on data-stack
+$7FEFFFFF $FFFFFFFF 2CONSTANT MAX-FLOAT      \ largest fp#=1.7976931348623E308
+
+FORTH-WORDLIST SET-CURRENT

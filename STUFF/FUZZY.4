@@ -1,0 +1,275 @@
+\ ----- FUZZY FORTH
+
+CREATE MLINK  0 ,      \ TEMP VALUE FOR MEMBER LINKS
+CREATE ILINK  0 ,      \ INPUT FUNCTIONS
+CREATE OLINK  0 ,      \ OUTPUT FUNCTIONS
+
+: INPUT
+   CREATE
+      0 ,                                    \ CRISP STORAGE
+      HERE  ILINK @ ,  ILINK !               \ INPUT LINKED LIST
+      HERE MLINK !  0 , ;                    \ INITIAL LINK
+
+: OUTPUT
+   CREATE
+      0 ,                                    \ CRISP STORAGE
+      HERE  OLINK @ ,  OLINK !               \ OUTPUT LINKED LIST
+      HERE MLINK !  0 , ;                    \ INITIAL LINK
+
+: MEMBER
+   CREATE
+      0 ,                                    \ FUZZY VALUE
+      HERE MLINK @ !  HERE MLINK !  0 ,      \ LINK
+   DOES>  @ ;                                \ RETURN VALUE
+
+: SINGLETON
+   CREATE
+      0 ,                                    \ FUZZY VALUE
+      HERE MLINK @ !  HERE MLINK !  0 ,      \ LINK
+   DOES>  DUP @ ROT MAX SWAP ! ;             \ ACCUMULATE MAXIMUMS
+
+\ ----- INITIALIZATION
+
+: SLOPE ( P2 P1 -- N )
+   - 65536 SWAP / ABS ;
+
+: INIT_MEMBERS ( LINK -- )
+   BEGIN
+      @ ?DUP WHILE  >R
+      R@ 1 CELLS + 2@ SLOPE  R@ 5 CELLS + !
+      R@ 3 CELLS + 2@ SLOPE  R@ 6 CELLS + !   R>
+   REPEAT ;
+
+: INIT_INPUTS                                \ INITIALIZE INPUT FUNCTIONS
+   ILINK @ BEGIN
+      ?DUP WHILE
+      DUP CELL+ INIT_MEMBERS  @
+   REPEAT ;
+
+: INIT_SINGLETONS ( LINK -- )
+   BEGIN
+      @ ?DUP WHILE  0 OVER CELL- !
+   REPEAT ;
+
+: CLEAR_OUTPUTS                              \ CLEAR THE OUTPUT FUNCTIONS
+   OLINK @ BEGIN
+      ?DUP WHILE
+      DUP CELL+ INIT_SINGLETONS  @
+   REPEAT ;
+
+\ 
+\ -----
+\ RULE EVALUATION
+
+: &   MIN ;
+: |   MAX ;
+: ~   256 SWAP - ;
+
+VARIABLE SUM_A
+VARIABLE SUM_P
+
+: CONCLUDE ( OVAR -- CRISP )
+   0 SUM_A !  0 SUM_P !          \ CLEAR SUM OF AREA, SUM OF PRODUCT TERMS
+   DUP >R
+   2 CELLS + BEGIN               \
+      @ ?DUP WHILE               \ L
+      DUP CELL- @  DUP SUM_A +!  \ L FV
+      OVER CELL+ @               \ L FV SINGLETON
+      * SUM_P +!                 \ L
+   REPEAT
+   SUM_P @ SUM_A @ /
+   DUP R> ! ;
+
+: --> ; IMMEDIATE
+
+\ -----
+
+: FUZLEFT ( CRISP MEMBER -- FUZZY )
+   DUP >R  @ -  R> 4 CELLS + @ 256 */  ABS ;
+
+: FUZRIGHT ( CRISP MEMBER -- FUZZY )
+   DUP >R  3 CELLS + @ SWAP -  R> 5 CELLS + @ 256 */  ABS ;
+
+: IN ( crisp member n -- crisp member crisp range )
+   >R 2DUP R> CELLS + @ ;
+
+: FUZZIFY ( CRISP MEMBER -- FUZZY )
+   0 IN  <  IF ( BELOW LEFTMOST)  2DROP 0    EXIT THEN
+   1 IN  <  IF ( LM <= C <= LT )  FUZLEFT    EXIT THEN
+   2 IN  <= IF ( LT <= C <= RT )  2DROP 256  EXIT THEN
+   3 IN  <= IF ( RT <= C <= RM )  FUZRIGHT   EXIT THEN
+                                  2DROP 0    ;
+
+: APPLIES ( CRISP MEMBER -- )
+   TUCK  CELL+ FUZZIFY  SWAP CELL- ! ;
+
+: APPLY ( CRISP INPUT -- )
+   2DUP !  2 CELLS + BEGIN
+      @ ?DUP WHILE
+      ( CRISP LINK)  2DUP APPLIES
+   REPEAT DROP ;
+
+\ 
+\ -----
+\ PRINT FUZZY SYSTEMS FOR DEBUGGING
+
+: SHOW ( ADDR N -- )
+   ( N) 0 DO DUP @ 7 .R CELL+ LOOP DROP ;
+
+: .FN ( LINK -- )
+   PAD 15 BLANK
+   CELL- BODY> >NAME COUNT 31 AND  PAD SWAP CMOVE
+   PAD 15 TYPE SPACE ;
+
+: .MEMBERS ( LINK -- )
+   BEGIN
+      @ ?DUP WHILE
+      CR  DUP .FN
+      DUP CELL+ 4 SHOW
+   REPEAT ;
+
+: .INPUT ( addr -- )
+   CR DUP .FN CELL+ .MEMBERS ;
+
+: .INPUTS                                \ INITIALIZE INPUT FUNCTIONS
+   ILINK @ BEGIN
+      ?DUP WHILE
+      DUP CR .INPUT
+      @
+   REPEAT SPACE ;
+
+: .SINGLETONS ( LINK -- )
+   BEGIN
+      @ ?DUP WHILE
+      CR  DUP .FN
+      DUP CELL+ 1 SHOW
+   REPEAT ;
+
+: .OUTPUT
+   CR DUP .FN  CELL+ .SINGLETONS ;
+
+: .OUTPUTS
+   OLINK @ BEGIN
+      ?DUP WHILE
+      DUP CR .OUTPUT
+      @
+   REPEAT SPACE ;
+
+\ 
+\ -----
+\ FUZZY DATABASE EDITOR (NUMBERS LIMITED TO -9999..0..9999)
+
+VARIABLE ACC
+VARIABLE POINTER
+
+VARIABLE LINE
+VARIABLE COL
+
+: SHOWACC
+   BASE @ >R DECIMAL
+      COL @ 2 + LINE @ AT ACC @ S>D 5 D.R
+   R> BASE ! ;
+
+: +CLAMP ( n -- n )
+   DUP 999 > IF 1000 MOD THEN ;
+
+: -CLAMP   NEGATE +CLAMP NEGATE ;
+
+: CLAMP ( n -- n )
+   DUP 0< IF  -CLAMP   ELSE  +CLAMP  THEN ;
+
+: ACCUM ( char -- )
+   ACC @ CLAMP 10 *  SWAP [CHAR] 0 -  OVER 0< IF NEGATE THEN +  ACC ! ;
+
+: BS ( char -- )
+   DROP  ACC @ 10 / ACC ! ;
+
+: MINUS ( char -- )
+   DROP ACC @ NEGATE ACC ! ;
+
+: BAD ( char -- )
+   DROP 7 EMIT ;
+
+: 0..9 ( char -- flag )
+   [CHAR] 0 [CHAR] : WITHIN ;
+
+: CLEAR ( char -- )
+   DROP  0 ACC ! ;
+
+: REPLACE
+   ACC @ POINTER @ ! ;
+
+: QUITS ( char -- char flag )
+   DUP 27 = IF ( ESC)    TRUE EXIT THEN   \ ESCAPE WITHOUT UPDATE
+   DUP 13 = IF REPLACE   TRUE EXIT THEN   \ ENTER ACCEPTS, SKIP TO NEXT FIELD
+   DUP  9 = IF REPLACE   TRUE EXIT THEN   \ TAB   ACCEPTS, SKIP TO NEXT FIELD
+                            0 ;
+
+: ACCUMULATES ( char -- )
+   DUP 32 = IF CLEAR EXIT THEN      \ SPACE CLEARS ACCUMULATOR
+   DUP  8 = IF BS    EXIT THEN      \ BACKSPACE DISCARDS ONE
+   DUP 45 = IF MINUS EXIT THEN      \ MINUS NEGATES
+   DUP 0..9 IF ACCUM EXIT THEN      \ 0..9 ACCUMULATES A DIGIT
+               BAD   ;              \ OTHERS BEEP
+
+\ 
+\ -----
+
+: FRAME    COL @ 1 + LINE @ AT [CHAR] [ EMIT
+           COL @ 7 + LINE @ AT [CHAR] ] EMIT SHOWACC ;
+
+: UNFRAME COL @ 1 + LINE @ AT BL EMIT
+          COL @ 7 + LINE @ AT BL EMIT SHOWACC ;
+
+: EDIT_VARIABLE ( addr -- )
+   DUP POINTER !  @ ACC !  FRAME
+   KEY QUITS IF DROP UNFRAME SHOWACC EXIT THEN  0 ACC !
+   BEGIN ( char)
+      ACCUMULATES SHOWACC
+      KEY
+      QUITS
+   UNTIL DROP UNFRAME ;
+
+: EDIT_MEMBER ( addr -- )
+   4 0 DO  I 7 * 16 + COL !  DUP EDIT_VARIABLE  CELL+  LOOP DROP ;
+
+: EDIT_INPUT ( addr -- )
+   PAGE DUP .INPUT  1 LINE !  CELL+
+   BEGIN
+      @ ?DUP WHILE
+      1 LINE +!
+      DUP CELL+ EDIT_MEMBER
+   REPEAT CR
+   INIT_INPUTS CR ;
+
+: EDIT_OUTPUT
+   PAGE DUP .OUTPUT CELL+ 1 LINE !  16 COL !
+   BEGIN
+      @ ?DUP WHILE
+      1 LINE +!
+      DUP CELL+ EDIT_VARIABLE
+   REPEAT CR ;
+
+\ -----
+
+: PARTOF? ( addr link -- flag )
+   @ BEGIN
+      ?DUP WHILE
+      OVER OVER = IF ( found it!)  2DROP TRUE EXIT THEN
+      @
+   REPEAT DROP 0 ;
+
+: IS_INPUT? ( addr -- flag )
+   ILINK PARTOF? ;
+
+: IS_OUTPUT?
+   OLINK PARTOF? ;
+
+: EDIT ( "name" -- )
+   ' >BODY CELL+
+   DUP IS_INPUT?  IF EDIT_INPUT  EXIT THEN
+   DUP IS_OUTPUT? IF EDIT_OUTPUT EXIT THEN
+   ." Can't edit this" ABORT ;
+
+
+

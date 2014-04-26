@@ -1,0 +1,26 @@
+\ ---------- RANDOM NUMBERS IN FORTH
+
+\  D. H. Lehmers Parametric multiplicative linear congruential
+\  random number generator is implemented as outlined in the
+\  October 1988 Communications of the ACM ( V 31 N 10 page 1192)
+
+     16807 CONSTANT A
+2147483647 CONSTANT M
+    127773 CONSTANT Q   \ m a /
+      2836 CONSTANT R   \ m a mod
+
+CREATE SEED 0 , 0 ,
+
+\ Returns a full cycle random number
+: RAND ( -- rand )  \ 0 <= rand < 4,294,967,295
+   SEED @ Q /MOD ( lo high)
+   R * SWAP A * 2DUP > IF  - ELSE  - M +  THEN  DUP SEED ! ;
+
+\ Returns single random number less than n
+: RND ( n -- rnd )  \ 0 <= rnd < n
+   RAND SWAP MOD ;
+
+: INIT-RND
+   $46C GS:@ SEED ! ;
+
+INIT-RND

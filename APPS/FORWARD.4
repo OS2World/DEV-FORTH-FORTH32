@@ -1,0 +1,27 @@
+\ a forward referencing package for forth/os2
+\ -----
+
+VOCABULARY FORWARDS
+
+VALUE FORWARD_DICTIONARY                \ points to memory for use
+VALUE FORWARD_LIMIT                     \ the end+1 of memory
+
+$10000 CONSTANT FORWARD_SIZE            \ size of dictionary
+
+: FORWARD_INIT
+   FORWARD_DICTIONARY ?DUP IF FREE ABORT" CAN'T FREE" THEN
+   FORWARD_SIZE ALLOCATE ABORT" CAN'T ALLOCATE"
+   DUP TO FORWARD_DICTIONARY  FORWARD_SIZE + TO FORWARD_LIMIT ;
+
+: BUILD_FORWARD ( caddr n -- )
+
+: REFERENCE ( caddr n -- )
+   2DUP FORWARD_FIND? IF
+      LINK_REFERENCE 2DROP
+      EXIT
+   THEN
+   BUILD_REFERENCE 
+   2DUP FORWARD_EXISTS? 0= IF 2DUP BUILD_FORWARD THEN 2DROP LINK_REFERENCE ;
+
+: UNDEFINED
+   

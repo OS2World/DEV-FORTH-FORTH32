@@ -1,0 +1,97 @@
+\ XSTR.4 -- Extended C-style strings for Forth.
+\ -----
+\ (c) 1994 Rick VanNorman
+\
+\ ANS Forth Program
+\ with Environmental Restrictions 
+\     - ASCII character set
+\     - Control codes for CRLF etc
+\ Requiring   WITHIN CASE OF ENDOF ENDCASE  from the Core Extensions word set.
+\ Requiring   SLITERAL /STRING              from the String word set.
+\
+
+
+\ Append a character to the counted string at PAD.
+: >PAD ( char -- )
+   PAD COUNT CHARS + C!  PAD C@ 1+ PAD C! ;
+
+\ Get a character from the input stream.  Return -1 if empty.
+: GETC ( -- char | -1 )
+   SOURCE >IN @ /STRING IF  
+      ( ok) C@  1 >IN +!  
+   ELSE 
+      ( empty) DROP -1  
+   THEN ;
+
+\ Compile a control character literal.  Compile only.  Assumes the
+\ ASCII character set.
+\ : [CTRL]
+\    BL WORD COUNT DROP C@ [CHAR] @ - POSTPONE LITERAL ; IMMEDIATE
+   
+\ Convert the alphabetic character to upper case.  Inefficient, 
+\ but portable in ANS Core words.
+\ : UPPER ( char -- CHAR )
+\    DUP [CHAR] a [ CHAR z 1+ ] LITERAL WITHIN IF
+\       [ CHAR a CHAR A - ] LITERAL -
+\    THEN ;
+
+\ Convert a hex character to a binary nibble.
+: A>HEX ( char -- nibble )
+   UPPER  DUP [CHAR] A < NOT IF 7 - THEN  [CHAR] 0 -  15 AND ;
+
+\ Except for the backslash (which signals an escape) and the 
+\ double-quote (which signals end of string), all normal characters 
+\ get stored in the dictionary.  The continuing states are: 
+\ normal characters= 1, escape= 2, and quote= zero.
+: NORMAL ( char -- state )
+   CASE
+      [CHAR] \ OF       2  ENDOF
+      [CHAR] " OF       0  ENDOF
+                   >PAD 1  DUP
+   ENDCASE ;
+
+: ESCAPED ( char -- state )
+   UPPER CASE
+      [CHAR] A OF  [CTRL] G >PAD  1  ENDOF
+      [CHAR] B OF  [CTRL] H >PAD  1  ENDOF
+      [CHAR] F OF  [CTRL] L >PAD  1  ENDOF
+      [CHAR] N OF  [CTRL] M >PAD
+                   [CTRL] J >PAD  1  ENDOF
+      [CHAR] R OF  [CTRL] M >PAD  1  ENDOF
+      [CHAR] T OF  [CTRL] I >PAD  1  ENDOF
+      [CHAR] V OF  [CTRL] K >PAD  1  ENDOF
+      [CHAR] X OF                 3  ENDOF
+                   DUP >PAD       1  SWAP 
+   ENDCASE ;
+
+\ Convert the first digit of a hex literal.
+: HEX1 ( char -- state )
+   A>HEX 16 * >PAD 4 ;
+
+\ Convert the second digit of a hex literal.
+: HEX2 ( char -- state )
+   A>HEX  PAD COUNT + 1- DUP C@  ROT OR  SWAP C!  1 ;
+
+\ The string compiler
+\ -----
+
+\ Parse a C-syntax string from the input stream until a
+\ non-escaped quote character is found, placing the text at PAD.
+: X"PARSE ( -- addr n )
+   0 PAD C!  1 BEGIN 
+      ?DUP ( state) WHILE
+      GETC DUP 0< IF
+         2DROP PAD COUNT EXIT
+      THEN
+      SWAP 
+      ( state) CASE
+         1 OF  NORMAL  ENDOF
+         2 OF  ESCAPED ENDOF
+         3 OF  HEX1    ENDOF
+         4 OF  HEX2    ENDOF
+      ENDCASE
+   REPEAT
+   PAD COUNT ;
+
+: X"
+   X"PARSE STATE @ IF POSTPONE SLITERAL THEN ;  IMMEDIATE

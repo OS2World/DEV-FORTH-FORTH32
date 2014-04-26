@@ -1,0 +1,180 @@
+\ SIMPLE LISTING UTILITY FOR N32 METACOMPILER
+\ NEEDED TO SIMPLIFY D32 BUILD
+
+CAPS ON
+
+\ assumes a lot of knowledge about the metacompiler
+
+value listfile
+
+create "crlf   2 c, 13 c, 10 c, 0 c,
+
+: $>listing ( addr # -- )
+   listfile write-file drop ;
+
+: >listing ( n -- )
+   pad !  pad 4 $>listing ;
+
+: c>listing ( n -- )
+   pad c!  pad 1 $>listing ;
+
+: end_line
+   0 c>listing here-t >listing ;
+
+: a_line ( addr # -- )
+   here-t >listing  ( addr #)  $>listing "crlf count $>listing ;
+
+: start_line
+   tib #tib @ a_line ;
+
+: _lrefill ( -- flag )
+   end_line _refill start_line ;
+
+\ force a new line with blank text in the listing file
+: NEW-LINE
+   listing if
+      end_line "  " a_line
+   then ;
+
+\ write an escape (N) and the dp
+: BREAK-LINE ( dp n -- )
+   listing if
+      c>listing >listing
+      exit
+   then 2drop ;
+
+\ -----
+
+: $list_off
+   end_line  ['] _refill 'refill ! ;
+
+: $list_on
+   ['] _lrefill 'refill !  start_line ;
+
+: create_listing
+   " output.tmp" w/o create-file abort" can't create output.tmp" to listfile ;
+
+: close_listing
+   listfile close-file drop ;
+
+\ -----
+\ gen prn file
+
+value tmpfile
+value prnfile
+
+: >prn ( addr # -- )   prnfile write-file drop ;
+
+\ -----
+
+\ reading the list temp file
+
+value eof
+
+\ the entire list file may be read sequentially, never going backwards...
+
+: list@  ( -- n )   0 pad !  pad 4 tmpfile read-file 2drop pad @ ;
+: listc@ ( -- n )   0 pad !  pad 1 tmpfile read-file 2drop pad @ ;
+
+: listline ( -- addr # )   pad dup 128 tmpfile read-line drop 0= to eof ;
+
+\ ----------
+\ measure a line in the temp file
+\
+\ a line in the list file is
+\
+\      startdp "line text" crlf [ nonzero escape ] 0 enddp
+\
+
+create linebuf   129 allot
+
+variable startdp
+variable enddp
+variable escape
+variable escapeval
+
+: measure
+   list@ startdp !
+   listline linebuf place
+   begin
+      listc@ ?dup while
+      dup escape !
+      list@  swap 2 = if escapeval ! else startdp ! then
+   repeat
+   list@ enddp ! ;
+
+\ ----------
+\ formatting the output file
+
+\ see if more bytes are left
+: more? ( -- f )
+   startdp @ enddp @ < ;
+
+\ print a number in a field of zeros
+: ##s ( n # -- )
+   >r 0 r> <# 0 do # loop #> >prn ;
+
+\ print the address column, which is the startdp or the value of an equ
+: address ( addr -- )
+   escape @ 2 = if drop escapeval @  escape off  then
+   8 ##s "   " >prn ;
+
+\ print data, 8 bytes per line. fill with spaces if less than 8 required
+: data
+   8 0 do
+      more? if
+         startdp @ c@-t 2 ##s
+         1 startdp +!
+      else
+         "   " >prn
+      then
+   loop "   " >prn ;
+
+\ print the text of the line
+: text   linebuf count >prn ;
+
+\ print cr, data list, and address
+: d+a
+   "crlf count >prn  startdp @ >r  data  r> address  ;
+
+\ ----------
+\ print the entire line record
+
+: showline
+   base @ >r hex
+   d+a text
+   begin more? while d+a repeat
+   r> base ! ;
+
+: make-prn
+   begin
+      measure
+      eof not while
+      showline
+   repeat ;
+
+
+\ -----
+
+: start-prn
+   " output.tmp" r/o open-file   abort" can't open output.tmp"   to tmpfile
+   " output.prn" w/o create-file abort" can't create output.prn" to prnfile ;
+
+: close-prn
+   tmpfile close-file drop
+   prnfile close-file drop ;
+
+: GEN_PRNFILE
+   cr ." making prnfile"
+   start-prn
+   make-prn
+   close-prn ;
+
+\ -----
+
+: $LIST    listing if create_listing $list_on then ;
+: $ENDLIST listing if $list_off close_listing gen_prnfile then ;
+
+CAPS OFF
+
+

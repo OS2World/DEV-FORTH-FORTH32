@@ -1,0 +1,349 @@
+\ -----
+\ Running under DPMI requires great effort to access real-mode interrupt
+\ services.  The following code is the protected-mode access to real-mode
+\ interrupts via DPMI's built in serivces
+
+
+\ A register structure is filled with data for the real-mode interrupt
+\ execution.  The register structure must be in the lower 64k of the
+\ flat arena because DPMI requires the offset to it passed in DX (16 bits).
+\ if it was above 64k, the offset to it would require more than 16 bits.
+
+here equ pregs
+
+ here equ regdi   4 allot             \  00h         EDI
+ here equ regsi   4 allot             \  04h         ESI
+ here equ regbp   4 allot             \  08h         EBP
+                  4 allot             \  0Ch  Reserved by system
+ here equ regbx   4 allot             \  10h         EBX
+ here equ regdx   4 allot             \  14h         EDX
+ here equ regcx   4 allot             \  18h         ECX
+ here equ regax   4 allot             \  1Ch         EAX
+ here equ rflag   2 allot             \  20h        Flags
+ here equ reges   2 allot             \  22h         ES
+ here equ regds   2 allot             \  24h         DS
+ here equ regfs   2 allot             \  26h         FS
+ here equ reggs   2 allot             \  28h         GS
+ here equ regip   2 allot             \  2Ah         IP
+ here equ regcs   2 allot             \  2Ch         CS
+ here equ regsp   2 allot             \  2Eh         SP
+ here equ regss   2 allot             \  30h         SS
+                  8 ALLOT
+
+\ -----
+\ most interrupt users will copy existing 32-bit registers into the
+\ PREGS for the simplest interface and retrieve the results from PREGS
+\ SAVEREGS and GETREGS provide that interface.
+
+label saveregs
+        ax regax #) mov         \ save all basic registers
+        bx regbx #) mov         \ in the PREG structure
+        cx regcx #) mov         \
+        dx regdx #) mov         \
+        si regsi #) mov         \
+        di regdi #) mov         \
+        bp regbp #) mov         \
+        ax regax #) mov         \
+                    pushf       \ get flags
+                 ax pop         \ into ax
+    op: ax rflag #) mov         \ and write 16bits into PREGS
+              ax ax xor         \ a zero
+        ax regsp #) mov         \ to write into both regsp and regss
+                    ret
+
+label getregs
+        rflag #) ax mov
+         $ffff # ax and
+                 ax push
+                    popf
+        regbp #) bp mov
+        regdi #) di mov
+        regsi #) si mov
+        regdx #) dx mov
+        regcx #) cx mov
+        regbx #) bx mov
+        regax #) ax mov
+                    ret
+
+\ -----
+\ a simple interrupt 21 interface is provided. setup registers in PREGS,
+\ call the dos function, and restore the registers. call this routine
+\ instead of issuing an int21
+
+label int21
+        saveregs #) call
+          $300 # ax mov
+           $21 # bx mov
+             0 # cx mov
+         pregs # di mov
+                 ds push
+                 ds push
+                 es pop
+                $31 int
+                 ds pop
+         getregs #) call
+                    ret
+
+LABEL INT10
+        SAVEREGS #) CALL
+          $300 # ax mov
+           $10 # bx mov
+             0 # cx mov
+         pregs # di mov
+                 ds push
+                 ds push
+                 es pop
+                $31 int
+                 ds pop
+         getregs #) call
+                    ret
+
+\ constants for access after metacompile
+
+   INT21 CONSTANT INT21
+ GETREGS CONSTANT GETREGS
+SAVEREGS CONSTANT SAVEREGS
+   PREGS CONSTANT PREGS
+   INT10 CONSTANT INT10
+
+
+VARIABLE REALSEL
+VARIABLE REALSEG
+VARIABLE REALES                 \ SELECTOR POINTING TO EXTENDER'S PSP
+VARIABLE CALLERDS
+VARIABLE LINADDR
+
+\ the most primitive way to exit a dos program
+CODE BYE
+        reales #) es mov
+        $4C # AH MOV
+        $21 INT
+        END-CODE
+        NO-EXPAND
+
+\ put a string into the dos segment
+CODE >REALSEG ( from to # -- )
+                bx cx   mov     \ count in cx for repne
+                   di   pop     \ get dest into di
+                   ax   pop     \ get address of source
+                ax si   xchg    \ save si in ax
+        realsel #) es   mov     \ source from ds into es
+                        repne   \
+                        movsb   \ copy string
+                ax si   xchg
+                   bx   pop     \ restore tos
+                        end-CODE
+                        no-expand
+
+CODE REALSEG> ( from to # -- )
+                bx cx   mov     \ count in cx
+                   di   pop     \ destination in es:di
+                   ax   pop     \ source in ax
+                ax si   xchg    \ save si in ax   
+                ds dx   mov     \ save ds
+                dx es   mov     \ in es also
+        realsel #) ds   mov     \ set ds
+                        repne   \
+                        movsb   \ copy string
+                dx ds   mov     \ restore ds
+                ax si   xchg    \ restore si
+                   bx   pop     \ new tos
+                        end-CODE
+                        no-expand
+
+\ -----
+\ EXTENDED SEGMENTS
+
+CODE SEG>DESC ( -- DESCRIPTOR )
+        2 # AX MOV
+        $31 INT
+        1 L# JC
+        AX BX MOV
+        2 L# JU
+1 L:    BX BX XOR
+2 L:    END-CODE
+        NO-EXPAND
+
+\ -----
+
+CODE FS! ( desc -- )
+        BX FS MOV
+        BX POP
+        END-CODE
+
+CODE FS@ ( -- desc )
+        BX PUSH
+        FS BX MOV
+        END-CODE
+
+CODE GS! ( desc -- )
+        BX GS MOV
+        BX POP
+        END-CODE
+
+CODE GS@ ( -- desc )
+        BX PUSH
+        GS BX MOV
+        END-CODE
+
+\ -----
+
+CODE FS:C! ( char addr -- )
+        AX POP                  \ GET THE CHAR
+        FS: AL 0 [BX] MOV       \ WRITE THE CHAR
+        BX POP                  \ NEW TOS
+        END-CODE
+
+CODE GS:C! ( char addr -- )
+        AX POP                  \ GET THE CHAR
+        GS: AL 0 [BX] MOV       \ WRITE THE CHAR
+        BX POP                  \ NEW TOS
+        END-CODE
+
+CODE FS:C@ ( addr -- char )
+        FS: 0 [BX] AL MOV
+        BX BX XOR
+        AL BL MOV
+        END-CODE
+
+CODE GS:C@ ( addr -- char )
+        GS: 0 [BX] AL MOV
+        BX BX XOR
+        AL BL MOV
+        END-CODE
+
+\ -----
+
+\ fetch a 16 bit value from addr
+CODE FS:H@ ( addr -- n )
+                AX AX   XOR
+    FS: OP: 0 [BX] AX   MOV
+                AX BX   MOV
+                        END-CODE
+
+\ store a 16 bit value at addr
+CODE FS:H! ( n addr -- )
+                   AX   POP     \ get N
+    FS: OP: AX 0 [BX]   MOV     \ write 16 bits
+                   BX   POP
+                        END-CODE
+
+\ -----
+
+CODE FS:@ ( a-addr -- x )
+       FS: 00 [BX] BX   MOV
+                        END-CODE
+
+CODE FS:! ( x a-addr -- )
+           FS: 0 [BX]   POP
+                   BX   POP
+                        END-CODE
+
+CODE GS:@ ( a-addr -- x )
+       GS: 00 [BX] BX   MOV
+                        END-CODE
+
+CODE GS:! ( x a-addr -- )
+           GS: 0 [BX]   POP
+                   BX   POP
+                        END-CODE
+
+
+\ -----
+\ video interrupt interface
+
+CODE VMODE@ ( -- n )
+        BX PUSH
+        $0F # AH MOV
+        INT10 #) CALL
+        BX BX XOR
+        AL BL MOV
+        END-CODE
+        NO-EXPAND
+
+CODE TIME&DATE ( +n1 +n2 +n3 +n4 +n5 +n6 )
+        bx push
+        $2c # ah mov            \ dos get time
+        int21 #) call
+        bx bx xor
+        dh bl mov  bx push      \ seconds
+        cl bl mov  bx push      \ minutes
+        ch bl mov  bx push      \ hour
+        $2a # ah mov            \ dos get date
+        int21 #) call
+        bx bx xor
+        dl bl mov  bx push      \ day
+        dh bl mov  bx push      \ month
+        cx bx mov               \ year
+        $ffff # bx and          \ 16 bits...
+        end-code
+        no-expand
+
+: VINIT
+   VMODE@ 3 = IF    ( color)  $B800
+              ELSE  ( mono )  $B000  THEN  SEG>DESC FS! ;
+
+\ -----
+
+: CMDLINE ( -- addr n )
+   $80 COUNT ;
+
+: CMDNAME ( -- addr n ) 0 0 ;
+\   " FORTH.EXE" ;
+   
+
+\ dpmi memory allocation functions
+\ -----
+
+code dpmi_allocate ( n -- memhandle linaddr )
+          bx push                       \ convert bx into 2 16-bit chunks
+      op: cx pop                        \ 
+      op: bx pop                        \ 
+          si push
+   $501 # ax mov
+         $31 int
+          ax pop     \ temp for si
+      op: si push
+      op: di push
+      op: bx push
+      op: cx push
+       ax si mov
+      0 # bx mov
+        1 L# jnc
+          bx dec
+1 L:         end-code
+             no-expand
+
+code dpmi_release ( handle -- ior )
+          si push                       \ save si for forth
+          bx push                       \ convert handle from 32 to 16
+      op: di pop                        \ get lo 16
+      op: si pop                        \ and hi 16
+   $502 # ax mov                        \ function
+         $31 int                        \ dpmi
+          si pop                        \ restore si
+      0 # bx mov                        \ false for ior
+        1 L# jnc                        \ skip if ok
+          bx dec                        \ bad, make ior = -1
+1 L:         end-code                   \
+             no-expand
+
+: ALLOCATE ( N -- ADDR IOR )
+   DUP 2 CELLS + DPMI_ALLOCATE ( N HANDLE ADDR IOR)
+   IF   ( BAD)                          \ NON-ZERO IS ERROR
+      DROP DROP DROP 0 TRUE             \ DISCARD ALL, RETURN 0 AND TRUE
+   ELSE ( GOOD)                         \ ZERO IS SUCCESS
+      LINADDR @ -                       \ ADDR IS MODIFIED BY DPMI START 
+      DUP >R  2!  R> 2 CELLS + FALSE    \ STORE HANDLE AND SIZE AT START
+   THEN ;                               \ AND RETURN ADDR+(2CELLS) AND FALSE
+
+: FREE ( ADDR -- IOR )
+   2 CELLS - @ DPMI_RELEASE ;
+   
+: RESIZE ( ADDR U -- ADDR IOR )
+   ALLOCATE ?DUP IF NIP EXIT THEN ( ERROR)
+   ( ADDR1 ADDR2)
+   2DUP  OVER CELL- @  OVER CELL- @  MIN  CMOVE
+   SWAP FREE DROP 0 ;
+   
+

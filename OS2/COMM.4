@@ -1,0 +1,209 @@
+\ ---------------------------------------------------------------------------
+\
+\ access to the serial ports
+\ 
+\ ---------------------------------------------------------------------------
+\ usage:
+\
+\ 1 COM#!             selects serial port number 1 for communication. All
+\                     following commands refer to this port-number.
+\
+\ COM#@               returns the selected port-number.
+\
+\ OpenCOM             opens the communication port.
+\
+\ CloseCOM            closes the communication port.
+\
+\ 9600 Set_Baud       sets the baud-rate to 9600.
+\
+\ RTS_ON              sets the RTS-signal (Request To Send) to on.
+\
+\ RTS_OFF             sets the RTS-signal to off.
+\
+\ XEMIT               EMIT for the serial-port.
+\
+\ XTYPE               TYPE for the serial-port.
+\
+\ XKEY?               KEY? for the serial-port.
+\
+\ XKEY                KEY for the serial-port.
+\ 
+\ ---------------------------------------------------------------------------
+
+CREATE FileHandle  4 CELLS ALLOT
+CREATE ActionTaken 4 CELLS ALLOT
+CREATE COM_Name CHAR C C,
+                CHAR O C,
+                CHAR M C,
+                CHAR 0 C,               \ dummy
+                0 C,                    \ terminate string
+
+: COM#! ( n -- )
+   COM# ! ;
+
+: COM#@ ( -- n )
+   COM# @ ;
+
+: OpenCOM ( -- )
+   COM#@ 48 + COM_Name 3 + C!           \ insert the com# in string
+   0                                    \ EABuf:         0
+   $42                                  \ OpenMode:      see cpgref
+   1                                    \ OpenFlag:      open if exists
+   0                                    \ FileAttribute: read/write
+   0                                    \ FileSize:      0
+   COM#@ 1- CELLS ActionTaken +         \ AktionTaken:   returns aktion
+   COM#@ 1- CELLS FileHandle +          \ FileHandle:    returns file-handle
+   COM_Name                             \ FileName:
+   DosOpen                              \ open the port
+   ABORT" Error opening the communication port" ;
+
+: Handle@ ( -- handle )
+   COM#@ 1- CELLS FileHandle + @ ;
+   
+: CloseCOM ( -- )
+   Handle@                              \ get the file-handle
+   DosClose                             \ close the port
+   ABORT" Error closing the communication port" ;
+
+VARIABLE NIL
+VARIABLE BPS
+VARIABLE ParamLen    2 ParamLen !
+
+: SetBaud ( n -- )
+   BPS !                                \ store baud-rate
+   0                                    \ DataLengthInOut:
+   0                                    \ DataLengthMax:
+   0                                    \ DataArea:
+   ParamLen                             \ ParmLengthInOut:
+   4                                    \ ParmLengthMax:
+   BPS                                  \ ParmList:
+   $41                                  \ Function:        ASYNC_SETBAUDRATE
+   1                                    \ Category:        IOCTL_ASYNC
+   Handle@                              \ DevHandle:
+   DosDevIOCtl                          \ set the parameter
+   ABORT" Error setting communication port parameter" ;  \ 
+
+\ -----
+\ rts_on, rts_off
+
+CREATE $46Para  $02 C, $FF C,
+CREATE $46Data  0 ,
+CREATE $46DataLen 0 ,
+CREATE $46ParaLen 2 ,
+
+: RTS2 ( -- )
+   $46DataLen                           \ DataLengthInOut:
+   2                                    \ DataLengthMax:
+   $46Data                              \ DataArea:
+   $46ParaLen                           \ ParmLengthInOut:
+   2                                    \ ParmLengthMax:
+   $46Para                              \ ParmList:
+   $46                                  \ Function:        
+   1                                    \ Category:        IOCTL_ASYNC
+   Handle@                              \ DevHandle:
+   DosDevIOCtl                          \ set the parameter
+   ABORT" Error setting communication port parameter" ;  \ 
+
+CREATE $53Para    0 , $00 C, $00 C, $00 C, 0 ,
+CREATE $53ParaLen 11 ,
+
+: RTS1 ( -- )
+   0                                    \ DataLengthInOut:
+   0                                    \ DataLengthMax:
+   0                                    \ DataArea:
+   $53ParaLen                           \ ParmLengthInOut:
+   11                                   \ ParmLengthMax:
+   $53Para                              \ ParmList:
+   $53                                  \ Function:        
+   1                                    \ Category:        IOCTL_ASYNC
+   Handle@                              \ DevHandle:
+   DosDevIOCtl                          \ set the parameter
+   ABORT" Error setting communication port parameter" ;
+
+: RTS_ON
+   $02 $46Para C! $FF $46Para 1+ C!
+   RTS1 RTS2 ;
+
+: RTS_OFF
+   $00 $46Para C! $FD $46Para 1+ C!
+   RTS1 RTS2 ;
+      
+\ -----
+\ xemit, xtype, xkey?, xkey
+
+VARIABLE BytesWritten
+
+: XEMIT ( char -- ) 
+  PAD C!                               \ store char in buffer
+   BytesWritten                         \ BytesWritten: returns # of bytes
+   1                                    \ BufferLength: 1 char = 1 byte
+   PAD                                  \ BufferArea:
+   Handle@                              \ FileHandle:
+   DosWrite                             \ write the data
+   ABORT" Error writing to communication port" ;
+
+: XTYPE ( addr n -- )
+   BytesWritten                         \ BytesWritten: returns # of bytes
+   SWAP                                 \ BufferLength: n bytes
+   ROT                                  \ BufferArea:   addr
+   Handle@                              \ FileHandle:
+   DosWrite                             \ write the data
+   ABORT" Error writing to communication port" ;
+
+CREATE $68Data    0 , 0 ,
+CREATE $68DataLen 2 ,
+
+: XKEY? ( -- flag )
+   $68DataLen                           \ DataLengthInOut:
+   2                                    \ DataLengthMax:
+   $68Data                              \ DataArea:
+   0                                    \ ParmLengthInOut:
+   0                                    \ ParmLengthMax:
+   0                                    \ ParmList:
+   $68                                  \ Function:        
+   1                                    \ Category:        IOCTL_ASYNC
+   Handle@                              \ DevHandle:
+   DosDevIOCtl                          \ set the parameter
+   ABORT" Error getting the number of received characters"  \ 
+   $68Data @ $FFFF and 0<> ;
+
+VARIABLE BytesRead
+
+: (XKEY) ( -- char )
+   BytesRead                            \ BytesRead:    returns # of bytes
+   1                                    \ BufferLength: 1 char = 1 byte
+   PAD                                  \ BufferArea:
+   Handle@                              \ FileHandle:
+   DosRead                              \ read the data
+   ABORT" Error reading from communication port"   \ 
+   PAD C@ ;
+
+: XKEY ( -- char )
+   BEGIN
+      XKEY?
+   UNTIL
+   (XKEY) ;
+
+\ -----
+\ test it
+
+: terminal
+   3 com#!
+   opencom
+   9600 SetBaud
+   rts_on
+   begin
+      xkey
+      dup emit dup xemit
+      27 =
+   until
+   closecom ;
+
+
+
+
+
+
+
+
+

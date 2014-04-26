@@ -1,0 +1,23 @@
+\ dump a memory image
+
+\ -----
+\ memory dump
+
+: FDUMP ( addr n -- )
+   ?DUP IF
+      BASE @ >R HEX
+      0 DO ( addr)
+         CR I 8 U.R ."  : "
+         DUP  16 BOUNDS DO  I H@ 0 <# # # # # #> TYPE SPACE  2 +LOOP ."  |"
+         DUP  16 BOUNDS DO  I C@ 127 AND BL MAX EMIT  LOOP ." |"
+         16 +
+         KEY? IF LEAVE THEN 
+      16 +LOOP
+      R>  BASE ! 
+   THEN DROP ;
+
+: RFILE
+   BL WORD COUNT R/O OPEN-FILE ABORT" NO FILE" >R
+   PAD DUP 32 1024 * R@ READ-FILE ABORT" BAD READ"
+   16 + FDUMP
+   R> CLOSE-FILE ;

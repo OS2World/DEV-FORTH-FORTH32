@@ -1,0 +1,15 @@
+\ simple scroll test
+\ -----
+
+create attr  $20 c, $07 c, 
+
+: pattern
+   40 0 do cr 
+      70 0 do 
+         j [char] A + emit
+      loop
+   loop ;
+
+: z
+   0 attr 4 50 20 10 10 vioscrollup ;
+   

@@ -1,0 +1,178 @@
+\ ----- misc tools
+
+\ ----- ONLY ALSO VOCABULARY support
+
+: WORDLIST ( -- a )
+   HERE 0 , ;
+
+: DO-VOCABULARY ( -- )
+   DOES>  CELL+ @ >R
+      GET-ORDER  NIP  ( wid1 ... widn-1 n )
+      R> SWAP SET-ORDER ;
+
+CREATE FORTH  ( vlink) 0 ,  HERE VLINK !  FORTH-WORDLIST ,  DO-VOCABULARY
+
+: VOCABULARY ( "name" -- )
+   WORDLIST CREATE  VLINK @ , HERE VLINK !  ( wlist) ,  DO-VOCABULARY ;
+
+\ -----
+
+: DEREF ( wlist -- vlink )
+   VLINK @ BEGIN ( wlist vlink)
+      DUP WHILE
+      2DUP @ = IF  NIP EXIT  THEN
+      CELL- @
+   REPEAT NIP ;
+
+: .VOC ( wlist -- )
+   DEREF ?DUP IF  CELL - BODY> >NAME .ID  ELSE  ." ??? "  THEN ;
+
+
+\ print CONTEXT, the ALSO array, and CURRENT
+: ORDER ( -- )
+   CR ."  Context: "
+   #ORDER @ 0 ?DO
+      CONTEXT I CELLS + @ .VOC
+   LOOP
+   CR ."  Current: " CURRENT @ .VOC ;
+
+\ print all of the vocabularies
+: VOCS ( -- )
+   CR VLINK @
+   BEGIN ( vlink)
+      CELL-  DUP  BODY> >NAME .ID  @ ?DUP
+   0= UNTIL ;
+
+
+\ -----
+
+\ search all vocabularies for a word
+
+: XFIND ( c-addr -- c-addr 0 | xt 1 | xt -1 )
+   DUP C@ IF
+      DUP ?CAPS
+      _FIND ?DUP ?EXIT
+      VLINK BEGIN ( C-ADDR VLINK)
+         @ ?DUP WHILE
+         >R  DUP COUNT  R@ @ SEARCH-WORDLIST
+         ?DUP IF  ROT DROP R>DROP  EXIT  THEN
+         R> CELL-
+      REPEAT
+   THEN FALSE ;
+
+\ -----
+
+
+\ defer
+
+\ the default behaviour of a deferred word
+: CRASH   S" un-initialized defer" ERR ;
+
+\ create a deferred word with default behaviour
+: DEFER
+   CREATE  ['] CRASH ,  DOES> @EXECUTE ;
+
+: IS
+   STATE @ IF    ' >BODY POSTPONE LITERAL POSTPONE !
+           ELSE  ' >BODY !
+           THEN ; IMMEDIATE
+
+\ ----- basic utilities
+ \
+  \ there are many utilities which are desireable in a forth system
+  \ and should be included, but are not necessary for a minimal
+  \ kernel.  in the interest of keeping things simple -- if the
+  \ kernel didn't need it for it's own compilation, it wasn't
+  \ included no matter how standard or nice it was.  these are
+  \ those words.
+
+\ ----- simple case statement
+
+\ these are simple macros to create the case statement.  slow and bulky
+: CASEOF    " OVER = IF DROP " EVALUATE ;  IMMEDIATE
+: FOESAC    " EXIT THEN "      EVALUATE ;  IMMEDIATE
+
+\ -----
+
+\ Compare two strings for length bytes.
+\ return  negative if (s1 < s2); 0 if (s1 = s2); positive if (s1 > s2)
+: COMP ( a1 a2 # -- -/0/+ )
+   0 DO ( a1 a2)
+      OVER C@ UPPER
+      OVER C@ UPPER - ?DUP IF
+         NIP NIP ( throw addresses and loop index)
+         0< IF  -1  ELSE  1  THEN
+         UNLOOP EXIT
+      THEN
+      SWAP 1+  SWAP 1+
+   LOOP  2DROP 0 ;
+
+\ -----
+
+: MANY
+   KEY? IF EXIT THEN 0 >IN ! ;
+
+\ -----
+\ FORGET
+
+\ unlink words below the given address.
+: clip ( a 'lfa -- )
+   BEGIN ( a lfa)
+      DUP @
+   WHILE ( a lfa)
+      2DUP @ CELL- SWAP U< NOT ( ie U<= )
+      IF    DUP @ CELL- @ OVER ! ( unlinks it )
+      ELSE  @  CELL- THEN
+   REPEAT  2DROP ;
+
+\ crop dictionary to the given link address.
+: crop ( lfa -- )
+   VLINK 2DUP clip
+   BEGIN ( lfa vlink)
+      @ ?DUP WHILE
+      2DUP @ clip CELL-
+   REPEAT DP ! ;
+
+: FORGET   \ forget words from the following <name>.
+   CURRENT @ CONTEXT !   ' >link  dup fence @ < abort" Can't" crop ;
+
+: EMPTY   ONLY FORTH ALSO DEFINITIONS   FENCE @ crop ;
+: MARK    HERE FENCE ! ;
+
+\ -----
+
+: SWITCHES , ' , ;
+: ENDSWITCH   -1 , -1 , ;
+
+\ execute the xt which matches x in the array at a-addr.  if no match is
+\ found, return true, otherwise false. the last xt pair must be -1.
+\ the xt value -1 is not allowed
+
+: CODESWITCH ( x a-addr -- flag )
+   BEGIN ( key addr)
+      DUP CELL+ @ 0< NOT WHILE
+      2DUP @ = IF  NIP  CELL+ @EXECUTE FALSE EXIT  THEN
+      2 CELLS +
+   REPEAT  2DROP TRUE ;
+
+\ an example:
+\
+\ CREATE Q-KEYS
+\         CTRL D SWITCHES C-END
+\         CTRL C SWITCHES END-FILE
+\         CTRL S SWITCHES C-HOME
+\         CTRL R SWITCHES HOME-FILE
+\                ENDSWITCH
+\
+\ : Q-KEYMAP
+\    EKEY $1F AND  Q-KEYS CODESWITCH ABORT" bad ^Q" ;
+
+
+\ -----
+
+: MS ( n -- )
+   ?DUP IF
+      182065 10000000 */ $46C GS:@ +
+      BEGIN  DUP  $46C GS:@ - 0<  UNTIL  DROP
+   THEN ;
+

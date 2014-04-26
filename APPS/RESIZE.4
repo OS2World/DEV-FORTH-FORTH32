@@ -1,0 +1,37 @@
+\ a simple resize utility in forth
+\ -----
+
+VARIABLE NEWSIZE
+CREATE FNAME  128 ALLOT
+
+: RESIZE-ERROR ( flag addr n -- )
+   ROT IF ." resize error: " TYPE QUIT BYE THEN 2DROP ;
+
+: RESIZE  
+   NEWSIZE @ $20000 <                  " too small" RESIZE-ERROR
+   NEWSIZE @ $1000000 >                " too large" RESIZE-ERROR
+   FNAME COUNT R/W OPEN-FILE                " open" RESIZE-ERROR >R
+   $191E 0 R@ REPOSITION-FILE " position, validate" RESIZE-ERROR
+   HERE 4 R@ READ-FILE            " read, validate" RESIZE-ERROR DROP
+   HERE @ $6E766372 <>        " invalid EXE format" RESIZE-ERROR
+   NEWSIZE 4 R@ WRITE-FILE                " write1" RESIZE-ERROR
+   $20C 0 R@ REPOSITION-FILE     " position, write" RESIZE-ERROR
+   NEWSIZE 4 R@ WRITE-FILE                " write2" RESIZE-ERROR
+   R> CLOSE-FILE                           " close" RESIZE-ERROR ;
+
+: ?HELP ( flag -- )
+   " Use: RESIZE filename.exe size" RESIZE-ERROR ;
+
+: DO_RESIZE
+   ARGC 3 <>  ?HELP
+   2 ARGV VAL? 1 <> ?HELP NEWSIZE !
+   1 ARGV FNAME PLACE 
+   RESIZE
+   BYE ;
+
+' DO_RESIZE 'STARTUP  !
+' QUIT 'STARTUP  !
+
+SAVE RESIZE.OS2
+BYE
+   

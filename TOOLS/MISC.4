@@ -1,0 +1,200 @@
+\ ----- misc tools
+
+\ ----- ONLY ALSO VOCABULARY support
+
+: WORDLIST ( -- a )
+   HERE  #THREADS 0 DO 0 , LOOP ;
+
+: DO-VOCABULARY ( -- )
+   DOES>  CELL+ @ >R
+      GET-ORDER  NIP  ( wid1 ... widn-1 n )
+      R> SWAP SET-ORDER ;
+
+CREATE FORTH  ( vlink) 0 ,  HERE VLINK !  FORTH-WORDLIST ,  DO-VOCABULARY
+
+: VOCABULARY ( "name" -- )
+   WORDLIST CREATE  VLINK @ , HERE VLINK !  ( wlist) ,  DO-VOCABULARY ;
+
+\ -----
+
+: DEREF ( wlist -- vlink )
+   VLINK @ BEGIN ( wlist vlink)
+      DUP WHILE
+      2DUP @ = IF  NIP EXIT  THEN
+      CELL- @
+   REPEAT NIP ;
+
+: .VOC ( wlist -- )
+   DEREF ?DUP IF  CELL - BODY> >NAME .ID  ELSE  ." ??? "  THEN ;
+
+
+\ print CONTEXT, the ALSO array, and CURRENT
+: ORDER ( -- )
+   CR ."  Context: "
+   #ORDER @ 0 ?DO
+      CONTEXT I CELLS + @ .VOC
+   LOOP
+   CR ."  Current: " CURRENT @ .VOC ;
+
+\ print all of the vocabularies
+: VOCS ( -- )
+   CR VLINK @
+   BEGIN ( vlink)
+      CELL-  DUP  BODY> >NAME .ID  @ ?DUP
+   0= UNTIL ;
+
+
+\ -----
+
+\ search all vocabularies for a word
+
+: XFIND ( c-addr -- c-addr 0 | xt 1 | xt -1 )
+   DUP C@ IF
+      DUP ?CAPS
+      _FIND ?DUP ?EXIT
+      VLINK BEGIN ( C-ADDR VLINK)
+         @ ?DUP WHILE
+         >R  DUP COUNT  R@ @ SEARCH-WORDLIST
+         ?DUP IF  ROT DROP R>DROP  EXIT  THEN
+         R> CELL-
+      REPEAT
+   THEN FALSE ;
+
+\ -----
+
+
+\ defer
+
+\ the default behaviour of a deferred word
+: CRASH   S" un-initialized defer" ERR ;
+
+\ create a deferred word with default behaviour
+: DEFER
+   CREATE  ['] CRASH ,  DOES> @EXECUTE ;
+
+: IS
+   STATE @ IF    ' >BODY POSTPONE LITERAL POSTPONE !
+           ELSE  ' >BODY !
+           THEN ; IMMEDIATE
+
+
+
+\ -----
+\ FORGET
+
+\ unlink words below the given address.
+: snip ( a thread  -- )
+   BEGIN ( a lfa)
+      DUP @
+   WHILE ( a lfa)
+      2DUP @ CELL- SWAP U< NOT ( ie U<= )
+      IF    DUP @ CELL- @ OVER ! ( unlinks it )
+      ELSE  @  CELL- THEN
+   REPEAT  2DROP ;
+
+: clip ( a wid -- )
+   #THREADS CELLS BOUNDS DO 
+      DUP I snip 
+   CELL +LOOP DROP ;
+
+\ crop dictionary to the given link address.
+: crop ( lfa -- )
+   VLINK 2DUP SNIP
+   BEGIN ( lfa vlink)
+      @ ?DUP WHILE
+      2DUP @ clip CELL-
+   REPEAT DP ! ;
+
+: FORGET   \ forget words from the following <name>.
+   CURRENT @ CONTEXT !   ' >link  dup fence @ < abort" Can't" crop ;
+
+: EMPTY   ONLY FORTH ALSO DEFINITIONS   FENCE @ crop ;
+: MARK    HERE FENCE ! ;
+
+: MARKER ( "<spaces>name" -- )
+   HERE  CREATE ,  DOES> @ crop ;
+
+\ -----
+
+: SWITCHES , ' , ;
+: ENDSWITCH   -1 , -1 , ;
+
+\ execute the xt which matches x in the array at a-addr.  if no match is
+\ found, return true, otherwise false. the last xt pair must be -1.
+\ the xt value -1 is not allowed
+
+: CODESWITCH ( x a-addr -- flag )
+   BEGIN ( key addr)
+      DUP CELL+ @ 0< NOT WHILE
+      2DUP @ = IF  NIP  CELL+ @EXECUTE FALSE EXIT  THEN
+      2 CELLS +
+   REPEAT  2DROP TRUE ;
+
+\ an example:
+\
+\ CREATE Q-KEYS
+\         CTRL D SWITCHES C-END
+\         CTRL C SWITCHES END-FILE
+\         CTRL S SWITCHES C-HOME
+\         CTRL R SWITCHES HOME-FILE
+\                ENDSWITCH
+\
+\ : Q-KEYMAP
+\    EKEY $1F AND  Q-KEYS CODESWITCH ABORT" bad ^Q" ;
+
+\ ----- 
+
+: [ELSE]  ( -- )
+   1 BEGIN                               \ level
+     BEGIN  BL WORD COUNT  2DUP UPCASE
+       DUP  WHILE                        \ level adr len
+       2DUP  S" [IF]"  COMPARE 0= IF     \ level adr len
+         2DROP 1+                        \ level'
+       ELSE                              \ level adr len
+         2DUP  S" [ELSE]"  COMPARE 0= IF \ level adr len
+            2DROP 1- DUP IF 1+ THEN      \ level'
+         ELSE                            \ level adr len
+           S" [THEN]"  COMPARE 0= IF     \ level
+             1-                          \ level'
+           THEN
+         THEN
+       THEN ?DUP 0=  IF EXIT THEN        \ level'
+     REPEAT  2DROP                       \ level
+   REFILL 0= UNTIL                       \ level
+   DROP ;  IMMEDIATE
+
+: [IF]  ( flag -- )
+   0= IF POSTPONE [ELSE] THEN ;  IMMEDIATE
+
+: [THEN]  ( -- )  ;  IMMEDIATE
+
+\ -----
+\ multiline comments for FORTHTeX 
+
+: \COMMENT    \  ( "ccc<\ENDCOMMENT>" -- )
+   FIL @ BLK @ 0= AND
+   IF  BEGIN  /SOURCE 2DUP UPCASE " \ENDCOMMENT"  SEARCH  NOT
+       WHILE  2DROP  REFILL NOT IF  #TIB @ >IN ! EXIT  THEN  REPEAT
+       #TIB @ SWAP - 11 +  >IN !  DROP
+   ELSE  [CHAR] ) PARSE 2DROP  THEN ;
+IMMEDIATE
+
+: \TITLE    \  ( "ccc<\ENDCOMMENT>" -- )
+   FIL @ BLK @ 0= AND
+   IF  BEGIN  /SOURCE 2DUP UPCASE " \ENDCOMMENT"  SEARCH  NOT
+       WHILE  2DROP  REFILL NOT IF  #TIB @ >IN ! EXIT  THEN  REPEAT
+       #TIB @ SWAP - 11 +  >IN !  DROP
+   ELSE  [CHAR] ) PARSE 2DROP  THEN ;
+IMMEDIATE
+
+\ -----
+
+: CS-ROLL ( .... U -- .... )   ROLL ;
+: CS-PICK ( .... U -- .... )   PICK ;
+
+\ repeat the TIB from start thru the word MANY until a key is hit
+: MANY
+   KEY? IF EXIT THEN 0 >IN ! ;
+
+VOCABULARY EDITOR
+

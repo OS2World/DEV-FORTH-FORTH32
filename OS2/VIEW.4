@@ -1,0 +1,87 @@
+\ simple test of message passing
+\ ----- 
+
+VOCABULARY VIEWER 
+ONLY FORTH ALSO VIEWER ALSO DEFINITIONS
+
+VARIABLE EMACS_HANDLE
+VARIABLE EMACS_PID
+VARIABLE EMACS_DATA
+
+CREATE EMACS_MSG  128 ALLOT
+
+: OPEN_EMACS_QUEUE
+   " \queues\emacs19\server" DROP
+                 EMACS_HANDLE
+                   EMACS_PID
+                 DOSOPENQUEUE ABORT" EMACS queue not active" ;
+   
+: CREATE_SHARED_MEMORY
+                         $213 \ pag_commit obj_givable pag_read pag_write
+                          128 \ len
+                            0 \ name
+                   EMACS_DATA \ buffer
+            DOSALLOCSHAREDMEM ABORT" can't alloc shared mem" ;
+
+: GIVE_SHARED_MEMORY
+                            1 \ pag_read
+                  EMACS_PID @ \ pid to give to
+                 EMACS_DATA @ \ memory to give
+             DOSGIVESHAREDMEM ABORT" couldn't give shared mem" ;
+
+: WRITE_MESSAGE
+                            0 \ 
+                 EMACS_DATA @ \ where message is
+                 EMACS_MSG C@ \ len of message
+                            0 \
+               EMACS_HANDLE @ \ handle of queue
+                DOSWRITEQUEUE ABORT" couldn't write EMACS queue" ;
+
+: FREE_SHARED_MEMORY
+                 EMACS_DATA @ \ memory
+                   DOSFREEMEM ABORT" couldn't free sahred mem" ;
+
+: CLOSE_EMACS_QUEUE
+               EMACS_HANDLE @ \ handle of queue
+                DOSCLOSEQUEUE ABORT" couldn't close EMACS queue" ;
+
+
+CREATE EOM  3 C, BL C, 10 C, 0 C, 
+
+: BUILD_MESSAGE ( line# c-addr u -- )
+   ( build number) ROT 0 <# BL HOLD #S [CHAR] + HOLD #> EMACS_MSG PLACE 
+   ( add filename) EMACS_MSG APPEND 
+   EOM COUNT EMACS_MSG APPEND ;
+
+: INVOKE_VIEWER 
+   OPEN_EMACS_QUEUE 
+   CREATE_SHARED_MEMORY
+   GIVE_SHARED_MEMORY
+   EMACS_MSG COUNT EMACS_DATA @ SWAP CMOVE
+   WRITE_MESSAGE
+   FREE_SHARED_MEMORY ;
+
+\ -----
+\ SIMPLE VIEW UTILTIY
+
+: VIEW@ ( xt -- line# c-addr u )
+   >VIEW @ DUP $FFFFFF AND SWAP 24 RSHIFT
+   DUP 255 = ABORT" Can't view keyboard definitions"
+   CELLS VIEW-FILES + @ COUNT $1F AND ;
+
+: GOVIEW ( line# c-addr u -- )
+   BUILD_MESSAGE INVOKE_VIEWER ;
+
+: VIEWING ( caddr -- )
+   XFIND IF VIEW@ GOVIEW ELSE DROP ." can't" THEN ;
+
+ONLY FORTH ALSO DEFINITIONS VIEWER ALSO
+
+: VIEW
+   BL WORD VIEWING ;
+
+: SEE
+   VIEW ;
+   
+ONLY FORTH ALSO DEFINITIONS
+

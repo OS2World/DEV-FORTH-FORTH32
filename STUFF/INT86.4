@@ -1,0 +1,136 @@
+\ -----
+\ Running under DPMI requires great effort to access real-mode interrupt
+\ services.  The following code is the protected-mode access to real-mode
+\ interrupts via DPMI's built in serivces
+
+
+\ A register structure is filled with data for the real-mode interrupt
+\ execution.  The register structure must be in the lower 64k of the
+\ flat arena because DPMI requires the offset to it passed in DX (16 bits).
+\ if it was above 64k, the offset to it would require more than 16 bits.
+
+here equ pregs
+
+ here equ regdi   4 allot             \  00h         EDI
+ here equ regsi   4 allot             \  04h         ESI
+ here equ regbp   4 allot             \  08h         EBP
+                  4 allot             \  0Ch  Reserved by system
+ here equ regbx   4 allot             \  10h         EBX
+ here equ regdx   4 allot             \  14h         EDX
+ here equ regcx   4 allot             \  18h         ECX
+ here equ regax   4 allot             \  1Ch         EAX
+ here equ rflag   2 allot             \  20h        Flags
+ here equ reges   2 allot             \  22h         ES
+ here equ regds   2 allot             \  24h         DS
+ here equ regfs   2 allot             \  26h         FS
+ here equ reggs   2 allot             \  28h         GS
+ here equ regip   2 allot             \  2Ah         IP
+ here equ regcs   2 allot             \  2Ch         CS
+ here equ regsp   2 allot             \  2Eh         SP
+ here equ regss   2 allot             \  30h         SS
+                  8 ALLOT
+
+PREGS  DUP CONSTANT R_DI
+CELL+  DUP CON
+
+           regdi
+           regsi
+           regbp
+
+           regbx
+           regdx
+           regcx
+           regax
+           rflag
+           reges
+           regds
+           regfs
+           reggs
+           regip
+           regcs
+           regsp
+           regss
+
+
+
+
+
+
+\ -----
+\ most interrupt users will copy existing 32-bit registers into the
+\ PREGS for the simplest interface and retrieve the results from PREGS
+\ SAVEREGS and GETREGS provide that interface.
+
+label saveregs
+        ax regax #) mov         \ save all basic registers
+        bx regbx #) mov         \ in the PREG structure
+        cx regcx #) mov         \
+        dx regdx #) mov         \
+        si regsi #) mov         \
+        di regdi #) mov         \
+        bp regbp #) mov         \
+        ax regax #) mov         \
+                    pushf       \ get flags
+                 ax pop         \ into ax
+    op: ax rflag #) mov         \ and write 16bits into PREGS
+              ax ax xor         \ a zero
+        ax regsp #) mov         \ to write into both regsp and regss
+                    ret
+
+label getregs
+        rflag #) ax mov
+         $ffff # ax and
+                 ax push
+                    popf
+        regbp #) bp mov
+        regdi #) di mov
+        regsi #) si mov
+        regdx #) dx mov
+        regcx #) cx mov
+        regbx #) bx mov
+        regax #) ax mov
+                    ret
+
+\ -----
+\ a simple interrupt 21 interface is provided. setup registers in PREGS,
+\ call the dos function, and restore the registers. call this routine
+\ instead of issuing an int21
+
+label int21
+        saveregs #) call
+          $300 # ax mov
+           $21 # bx mov
+             0 # cx mov
+         pregs # di mov
+                 ds push
+                 ds push
+                 es pop
+                $31 int
+                 ds pop
+         getregs #) call
+                    ret
+
+LABEL INT10
+        SAVEREGS #) CALL
+          $300 # ax mov
+           $10 # bx mov
+             0 # cx mov
+         pregs # di mov
+                 ds push
+                 ds push
+                 es pop
+                $31 int
+                 ds pop
+         getregs #) call
+                    ret
+
+\ constants for access after metacompile
+
+   INT21 CONSTANT INT21
+ GETREGS CONSTANT GETREGS
+SAVEREGS CONSTANT SAVEREGS
+   PREGS CONSTANT PREGS
+   INT10 CONSTANT INT10
+
+
+

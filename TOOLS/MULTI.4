@@ -1,0 +1,217 @@
+\ ----------------------------------------------------------------------------
+\
+\ simple multitasker using OS2 threads
+\
+\ ----------------------------------------------------------------------------
+\ usage:
+\
+\ ASSIGN TASK1 1 TO-TASK    assigns the previous defined word TASK1 to
+\                           task-number 1. The task will be started in the
+\                           suspended state.
+\
+\ 1 RESTART                 continues the suspended task 1
+\
+\ 1 HALT                    suspends the running task 1.
+\
+\ STOP                      suspends itself. This word has to be at the end
+\                           of each task.
+\
+\ 1 ACTIVATE                starts task 1 from the beginning (from scratch).
+\
+\ SEMAPHORE SEMA1           defines SEMA1 as a semaphore.
+\
+\ SEMA1 REQUEST             requests the semaphore SEMA1.
+\
+\ SEMA1 SIGNAL              releases the semaphore SEMA1.
+\
+\ ----------------------------------------------------------------------------
+
+\ -----
+\ #tasks, assign, to-task, halt, restart
+
+8 CONSTANT #TASKS                       \ 8 tasks allowed (0...7)
+
+CREATE ThreadID   #TASKS CELLS ALLOT    \ thread-id's
+CREATE ThreadAddr #TASKS CELLS ALLOT    \ thread-addr's
+
+\ init for task 0. this task is forth itself!!!
+1 ThreadID !                            \ task# 0 has thread-id=1
+' ABORT ThreadAddr !                    \ task# 0 is COLD/ABORT
+
+defer *STOP*
+
+: TASK_INIT2
+   sp0 @ cell+ 'TIB !
+   BLK OFF  FIL OFF
+   ONLY ALSO DEFINITIONS DECIMAL
+   SOURCE-ID OFF
+   STDIO                                \ set the standard i/o functions
+   14 SET-PRECISION                     \ set number of sign. digits (fp)
+   DUP >NAME COUNT $80 -                \ get name (c-addr u) of task-word
+   DUP>R                                \ save u
+   HERE 1+ SWAP CMOVE                   \ copy the string to here (for ABORT")
+   R> HERE C!                           \ and insert the length
+   CATCH                                \ start task
+   STDIO                                \ switch to standard i/o
+   CATCH-CASE *STOP* ;                  \ react on the throw and stop task
+   
+CODE TASK_INIT1
+                SP BP   XCHG    \ CODE exchanged the pointers
+                SP BP   MOV     \ copy the original stack-pointer
+            4 [BP] BX   MOV     \ get ThreadArg=task-addr
+                SP AX   MOV
+
+            $400 # ax   sub      \ start of user area
+                ax si   mov      \ save
+
+            cell # ax   sub      \ top of return stack
+      ax 5 cells [si]   mov      \ save RP0
+
+           $7f00 # sp   sub      \ point to start (bottom) of stack
+      sp 6 cells [si]   mov      \ save DP
+      sp 7 cells [si]   mov      \ save FENCE
+             
+                AX SP   MOV      \ SET INITIAL FORTH RP
+
+           $2000 # ax   sub      \ bottom of return stack
+            $100 # ax   sub      \ start of tib (cell above sp0)
+            cell # ax   sub      \ top of data stack
+      ax 4 cells [si]   mov      \ save SP0
+
+                AX BP   MOV      \ initial forth sp for stack
+                        CLD      \ set direction forwards (for next)
+
+      ' TASK_INIT2 #)   JMP
+   END-CODE
+
+: ASSIGN ( "name" -- addr )
+   STATE @ IF [COMPILE] ['] ELSE ' THEN  ;  IMMEDIATE
+
+: TO-TASK ( addr n -- )
+   2DUP CELLS ThreadAddr + !            \ save task-addr in array
+   >R                                   \ save task# on return-stack
+   $8000                                \ StackSize:   32 kBytes stack-size
+   3                                    \ ThreadFlags: susp.task, precommit st.
+   ROT                                  \ ThreadArg:   argument=task-addr
+   ['] TASK_INIT1                       \ ThreadAddr:  addr of task_init
+   R> CELLS ThreadID +                  \ ThreadID:    addr of tread-id
+   DosCreateThread                      \ create the thread
+   ABORT" Error assigning task" ;       \ 
+
+\ suspend the task # n
+: HALT ( n -- )
+   CELLS ThreadID + @                   \ get thread-id
+   DosSuspendThread                     \ suspend the thread
+   ABORT" Error suspending task" ;
+   
+\ continue the task # n
+: RESTART ( n -- )
+   CELLS ThreadID + @                   \ get thread-id
+   DosResumeThread                      \ resume the thread
+   ABORT" Error resuming task" ;
+
+\ -----
+\ activate
+
+: KILL-TASK ( n -- )
+   CELLS ThreadID + @                   \ get thread-id
+   DosKillThread                        \ kill the thread
+   ABORT" Error killing task" ;
+
+: ACTIVATE ( n -- )
+   DUP >R KILL-TASK                     \ kill the thread
+   R@ CELLS ThreadAddr + @              \ get thread-addr
+   R@ TO-TASK                           \ create the thread
+   R> RESTART ;                         \ and start it
+
+\ -----
+\ pause, wait
+
+\ : PAUSE ( -- )                          \ 
+\   0 DosSleep DROP ;                    \ give up this time-slice
+
+\ : WAIT ( n -- )                         \  
+\   0 ?DO PAUSE LOOP ;                   \ 
+
+: PAUSE ( -- )
+   ; IMMEDIATE                          \ do nothing
+
+: WAIT ( n -- )                         \  
+   DROP ;                               \ do nothing
+
+\ -----
+\ self, stop
+
+CREATE PPIB 0 ,
+CREATE PTIB 0 ,
+
+: GetTID ( -- n )
+   PPIB
+   PTIB
+   DosGetInfoBlocks
+   ABORT" Error in DosGetInfoBlocks"
+   PTIB @ $0C + @ @ ;
+
+\ return the number of the task
+: SELF ( -- n )
+   GetTID
+   #TASKS 0 DO
+      DUP ThreadID I CELLS + @ = IF DROP I UNLOOP EXIT THEN
+   LOOP ;
+
+\ halt the running task
+: STOP
+   SELF HALT ;
+
+' STOP is *STOP*
+
+\ -----
+\ semaphores
+
+CREATE Sema_Handle 0 ,
+
+CREATE Sema_Name 64 ALLOT
+
+\ creates the dos mutex_semaphore and return it's handle
+: DOS_DEFINE_SEMA ( "name" -- handle )
+   Sema_Name 64 ERASE                   \ erase the string
+   S" \SEM32\" Sema_Name SWAP CMOVE     \ insert the default text
+   BL WORD COUNT Sema_Name 7 + SWAP  CMOVE      \ and add the name
+   0                                    \ fState:  unowned
+   0                                    \ flAttr:  ---
+   Sema_Handle                          \ phmtx:   pointer to handle
+   Sema_Name                            \ Name:    zero-terminated string
+   DosCreateMutexSem                    \ create the semaphore
+   ABORT" Error creating semaphore"
+   Sema_Handle @ ;
+
+: SEMAPHORE
+   >IN @ >R                             \ save input stream pointer
+   DOS_DEFINE_SEMA
+   R> >IN !                             \ restore input stream pointer
+   CONSTANT ;                           \ make a constant
+
+: REQUEST ( sema-handle -- )
+   -1 SWAP                              \ Timeout: -1=no timeout
+   DosRequestMutexSem                   \ request the semaphore
+   ABORT" Error requesting semaphore" ;
+
+: SIGNAL ( sema-handle -- )
+   DosReleaseMutexSem                    \ release the semaphore
+   ABORT" Error releasing semaphore" ;
+
+\ -----
+
+: ReleaseTimeSlice ( -- )
+   0 DosSleep DROP ;
+
+: Set_Priority ( n -- )
+   >R                                   \ save n
+   0                                    \ ID:            self
+   0                                    \ PriorityDelta: 0
+   R>                                   \ PriorityClass: n
+   2                                    \ Scope:         PRTYS_THREAD
+   DosSetPriority DROP ;
+
+
+

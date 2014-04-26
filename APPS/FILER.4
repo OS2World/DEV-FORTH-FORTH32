@@ -1,0 +1,57 @@
+\ read an entire file for compilation
+\ ----- 
+
+defer cross_interpret
+
+256 1024 * constant filemax
+
+create fpos  0 , 0 ,
+
+variable 'fib
+variable #fib
+
+value fbuf
+
+: parseline ( -- flag )
+   fpos 2@ dup 0= if 2drop 0 exit then
+   2dup 13 scan            \ addr len addr' len'
+   2dup 2 /string fpos 2!  \ addr len addr' len'
+   nip  -                  \ addr #
+   #fib ! 'fib !  true ;
+
+
+: cc-save-input ( --- x x x ... x n )
+   >in @ 
+   'tib @ 
+   #tib @
+   fpos 2@
+   5 ;
+   
+: cc-restore-input
+   5 <> abort" bad cc-restore-input
+   fpos 2!
+   #tib !   
+   'tib !  
+   >in ! ;
+
+: cc-readall ( fileid -- )
+   ( fileid) >r
+   fpos 2@ + ( next free address)
+   dup filemax r@ read-file abort" couldn't read a file" fpos 2!
+   r> close-file abort" couldn't close a file" ;
+   
+: cc-including-file  ( -- flag )
+   begin 
+      parseline dup ( dummy *) 
+   while drop
+      ['] cross_interpret catch
+      dup ( *) if ferr then 
+      ?dup
+   until then ;
+
+: cc-include-file ( fileid -- )
+   cc-save-input n>r
+   cc-readall
+   cc-including-file ( flag)
+   nr> cc-restore-input 
+   throw ;

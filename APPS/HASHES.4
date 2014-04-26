@@ -1,0 +1,12 @@
+: count_links ( thread -- n )
+   0 begin ( thread n ) 
+      over @ while
+      swap @ cell- swap 1+
+   repeat nip ;
+
+: show_threads
+   cr ." thread usage: "
+   forth-wordlist #threads cells bounds do 
+      i count_links . 
+   cell +loop ;
+

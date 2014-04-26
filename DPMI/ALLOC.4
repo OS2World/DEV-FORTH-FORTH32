@@ -1,0 +1,59 @@
+\ allocation in dpmi
+\ -----
+
+CODE DPMI_ALLOC ( bytes -- handle addr )
+   SI PUSH                              \ SAVE FORTH REGISTERS
+   BP PUSH                              \ 
+   BX PUSH                              \ GET BYTES INTO BX:CX
+   OP: CX POP
+   $FFFF # CX AND
+   OP: BX POP
+   $FFFF # BX AND
+   $501 # AX MOV                        \ FUNCTION CODE
+   $31 INT                              \ CALL DPMI
+   OP: SI PUSH                          \ PUSH 16:16 RESULT (the handle)
+   OP: DI PUSH
+   DX POP
+   OP: BX PUSH
+   OP: CX PUSH                          \ PUSH 16:16 RESULT (addr)
+   BX POP                               \ POP AS 32 BIT ADDR
+   BP POP                               \ RESTORE FORTH REGISTERS
+   SI POP
+   DX PUSH
+   END-CODE
+   NO-EXPAND
+
+CODE LTD_ALLOC ( -- selector ior )
+   BX PUSH                              \ SAVE TOS
+   SI PUSH                              \ AND UP
+   BP PUSH                              \ AND RP
+   1 # CX MOV                           \ 1 DESCRIPTOR
+   0 # AX MOV                           \ COMMAND
+   $31 INT                              \ CALL DPMI
+   BP POP                               \ RESTORE
+   SI POP                               \
+   0 # BX MOV                           \ SET FLAG TO FALSE
+   1 L# JNC                             \ skip if no error
+   BX DEC                               \ MAKE FLAG TRUE
+1 L:
+   $FFFF # AX AND                       \ 16 BIT SELECTOR VALUE
+   AX PUSH                              \ SAVE
+   END-CODE
+   NO-EXPAND
+
+CODE SET_BASE ( addr selector -- ior )
+   OP: CX POP                           \ GET LOW ADDR
+   OP: DX POP                           \ GET HIGH ADDR
+   SI PUSH                              \ SAVE
+   BP PUSH                              \ 
+   7 # AX MOV                           \ FUNCTION
+   $31 INT                              \ DPMI
+   BP POP                               \ RESTORE
+   SI POP                               \ 
+   0 # BX MOV                           \ FLAG=FALSE
+   1 L# JNC                             \ ERROR IF CARRY IS SET
+   BX DEC                               \ ERROR IS TRUE
+1 L:
+   END-CODE
+   NO-EXPAND   
+   

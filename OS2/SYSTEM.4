@@ -1,0 +1,12 @@
+\ -----
+
+: AT-XY ( x y -- )
+   0 -ROT VIOSETCURPOS DROP ;
+   
+: XY? ( -- x y )
+   0  SP@ >R 0  SP@ >R 0  R> R> SWAP VIOGETCURPOS DROP ;
+
+\ delay for N milliseconds
+: MS ( n -- ) 
+   DOSSLEEP DROP ;
+

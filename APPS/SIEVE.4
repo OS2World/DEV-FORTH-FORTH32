@@ -1,0 +1,26 @@
+\ sieve 
+
+
+VALUE SIZE
+
+: FLAGS   PAD 1000 + ;
+
+: DO-PRIME  
+   FLAGS SIZE 1 FILL
+   0 SIZE 0 DO  
+      FLAGS  I + C@
+      IF I 2*  3 + DUP I +  FLAGS +
+         BEGIN  DUP SIZE FLAGS + U<
+         WHILE  DUP 0 SWAP C! OVER + REPEAT
+         DROP DROP 1+
+      THEN
+   LOOP
+   U. ." PRIMES"  CR   ;
+
+: PRIMES ( n -- )
+   DEPTH 1 < IF 8192 THEN  TO SIZE  DO-PRIME ;
+
+: SHOWME 
+   SIZE 0 DO I FLAGS + C@ IF I . THEN LOOP ;
+
+

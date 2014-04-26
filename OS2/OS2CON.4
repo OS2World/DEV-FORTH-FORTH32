@@ -1,0 +1,55 @@
+\ thunked key and emit
+\ -----
+
+CREATE KINFO  10 ALLOT
+
+: KBDINIT                               \ set for binary mode only
+   10 KINFO H!                          \ size of struct
+   0 KINFO KBDGETSTATUS 0= IF           \ get keyboard status
+      4 KINFO 2+ H!                     \ set for binary mode
+      0 KINFO KBDSETSTATUS DROP         \
+   THEN ;
+
+: _KEY? ( -- flag )
+   0 KINFO KBDPEEK                      \ peek at the keyboard
+   IF    FALSE                          \ non-zero, error, false
+   ELSE  KINFO 2+ C@ 64 AND 0<>         \ zero, good, final char status
+   THEN ;
+
+: _KEY ( -- char )
+   BEGIN
+      0 0 KINFO KBDCHARIN               \ wait for a character
+      IF 0 EXIT THEN                    \ non-zero, error
+      KINFO C@                          \ get char
+      ?DUP 0<>                          \ key prohibits extended codes
+   UNTIL ;
+
+: _EKEY ( -- echar )
+   0 0 KINFO KBDCHARIN                  \ wait for a character
+   IF    0                              \ non-zero, error, zero
+   ELSE  KINFO C@                       \ zero, get char
+      ?DUP IF EXIT THEN                 \ non-zero, return char
+      KINFO 1+ C@ BFLIP                 \ zero, return extended char
+   THEN ;
+
+: _EKEY? _KEY? ;
+
+: EKEY>CHAR ( echar -- char )
+   DUP 128 < ;
+
+\ -----
+
+| VARIABLE THE_CHAR
+| VARIABLE THE_COUNT
+| CREATE "CR   13 C, 10 C, 
+
+: _EMIT ( char -- )
+   THE_CHAR C!  THE_COUNT 1 THE_CHAR 1 DOSWRITE DROP  1 OUT +! ;
+
+: _TYPE ( addr n -- )
+   DUP OUT +!  THE_COUNT -ROT SWAP 1 DOSWRITE DROP ;
+
+: _CR   "CR 2 _TYPE  0 OUT ! ;
+
+: _EMIT? ( -- true )   TRUE ;
+

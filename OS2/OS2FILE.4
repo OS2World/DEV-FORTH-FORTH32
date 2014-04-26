@@ -1,0 +1,98 @@
+\ -----
+\ open, create, close, etc
+
+$40 CONSTANT R/O   \ Read-only  access method.  
+$41 CONSTANT W/O   \ Write-only access method.  
+$42 CONSTANT R/W   \ Read/write access method.  
+
+: BIN ; IMMEDIATE  \ all access is binary, do nothing
+
+variable ACTION
+
+: OPEN-FILE ( ca u w -- fileid ior ) 
+   FCB= TUCK SWAP 2>R  N>FCB 
+            0  \ peaop2
+           r>  \ open mode 
+            1  \ open flags, open if exists, fail otherwise
+            0  \ attribute
+            0  \ size
+       action  \ action
+           r@  \ pointer to handle
+    dup cell+  \ pointer to filename
+      dosopen  \ do it, returns flag 0 if ok
+   ?dup if   0 r> !  0 swap 
+        else r> 0 
+        then ; 
+
+: CREATE-FILE ( ca u w -- fileid ior ) 
+   FCB= TUCK SWAP 2>R  N>FCB 
+            0  \ peaop2
+           r>  \ open mode 
+          $12  \ open flags, truncate if exists, create if new
+            0  \ attribute
+            0  \ size
+       action  \ action
+           r@  \ pointer to handle
+    dup cell+  \ pointer to filename
+      dosopen  \ do it, returns flag 0 if ok
+   ?dup if   0 r> !  0 swap 
+        else r> 0 
+        then ; 
+
+: DELETE-FILE ( ca u -- ior ) 
+   FCB= DUP >R N>FCB DOSDELETE ;
+
+: CLOSE-FILE ( fileid -- ior )
+   DUP >R @ DOSCLOSE  R> OFF ;
+
+: READ-FILE ( c-addr u1 fileid -- u2 ior ) 
+   >R SWAP 2>R  0  SP@  2R> R> @ DOSREAD ;
+
+: WRITE-FILE ( c-addr u fileid -- ior ) 
+   >R SWAP 2>R  0  SP@  2R> R> @ DOSWRITE NIP ;
+
+: RENAME-FILE ( c-addr1 u1 c-addr2 u2 -- ior ) 
+   FCB= DUP >R N>FCB  FCB= DUP >R N>FCB 
+   R> R> SWAP DOSMOVE ;
+
+: SEEK-FILE ( doff n fileid -- dpos ior) 
+   >R -ROT D>S >R >R 0 SP@ R> R> R> @ DOSSETFILEPTR >R S>D R> ;
+
+: RESIZE-FILE ( ud fileid -- ior )
+   2DROP -1 ;
+   
+\ Reposition file.
+: REPOSITION-FILE ( ud fileid -- ior) 
+   0 SWAP SEEK-FILE  -ROT 2DROP ;
+
+\ Return file position.
+: FILE-POSITION ( fileid -- ud ior) 
+   >R  0 0 1 R> SEEK-FILE ;
+
+\ Return file size.  Does not change file position.
+: FILE-SIZE ( fileid -- ud ior) 
+   >R    R@ FILE-POSITION DROP  0 0 2 R@ SEEK-FILE DROP
+   2SWAP R> REPOSITION-FILE ;
+
+\ False if file exists.
+: FILE-STATUS ( ca u -- ior ior | ? 0) \ FILE EXT
+   R/O OPEN-FILE ?DUP
+   IF  SWAP OFF   DUP  ELSE  CLOSE-FILE  0  THEN ;
+
+\ impossible to guarantee on os/2, use best judgement here......
+: FLUSH-FILE ( fileid -- ior)  drop 0 ;
+
+: FEXT.OS2 ( addr -- )
+   DUP HASDOT? IF DROP EXIT THEN   " .OS2" ROT APPEND ;
+
+\ save an executable image. default extension is .x32
+
+: SAVE ( -- )
+   BL WORD DUP C@ HUH?  DUP FEXT.OS2
+   HERE DP_INIT !
+   COUNT W/O CREATE-FILE ABORT" can't create" ( fileid) >R
+   $100 +ORG HERE $100 +ORG -  DUP PAD CELL+ !  R@ WRITE-FILE DROP
+   $6E766372 PAD ! ( "rcvn" as a signature)
+   PAD 2 CELLS R@ WRITE-FILE DROP
+   R> CLOSE-FILE DROP ;
+
